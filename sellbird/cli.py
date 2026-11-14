@@ -239,6 +239,7 @@ def cmd_status(args):
         by_provider = summary.get("usage_today_by_provider", {})
         print(f"  Claude calls today:   {by_provider.get('claude', summary['usage_today'])}")
         print(f"  Codex calls today:    {by_provider.get('codex', 0)}")
+        print(f"  Ollama calls today:   {by_provider.get('ollama', 0)}")
         from sellbird.config import compliance_notice, load_config, sending_notice
         loaded = None
         try:
@@ -310,11 +311,15 @@ def cmd_status(args):
                 elif brain.provider == "codex":
                     print(f"  Brain:                {label} ready (CLI, isolation, login, "
                           "model and account checked; no prompt sent)")
+                elif brain.provider == "ollama":
+                    print(f"  Brain:                {label} ready (local server and model checked; "
+                          "no prompt sent)")
                 else:
                     print(f"  Brain:                {label} CLI isolation flags present "
                           "(login not checked: Claude is checked by its first call)")
         elif brain_status.get("status") == "paused":
-            label = {"claude": "Claude", "codex": "Codex"}.get(brain_status.get("provider"), "Brain")
+            label = {"claude": "Claude", "codex": "Codex",
+                     "ollama": "Ollama"}.get(brain_status.get("provider"), "Brain")
             print(f"  Brain:                {label} PAUSED since {brain_status.get('since', '?')}")
             print(f"                        {brain_status.get('reason', '')}")
         print()
@@ -356,7 +361,8 @@ def cmd_usage(args):
         except Exception:
             pass
 
-        label = {"claude": "Claude", "codex": "Codex"}.get(provider, "Brain")
+        label = {"claude": "Claude", "codex": "Codex",
+                 "ollama": "Ollama (local)"}.get(provider, "Brain")
         print(f"\n  {label} Usage")
         print("  " + "=" * 52)
         if windows:
@@ -370,6 +376,8 @@ def cmd_usage(args):
                   "version, and network).")
         elif provider == "claude":
             print("  Quota gauge unavailable (run 'claude login' or check network).")
+        elif provider == "ollama":
+            print("  Local inference: no subscription quota or per-token API bill.")
 
         totals = await state.usage_totals()
         print()
@@ -408,10 +416,13 @@ def cmd_usage(args):
                     f"    {row['task']:<22} {row['calls']:>5} calls  "
                     f"{row['output_tokens']:>10,} out tokens"
                 )
-        print(
-            "\n  Subscription plans aren't billed per token — these are usage"
-            "\n  counts, not costs.\n"
-        )
+        if provider == "ollama":
+            print("\n  Ollama runs locally. These are local inference counts, not subscription usage.\n")
+        else:
+            print(
+                "\n  Subscription plans aren't billed per token — these are usage"
+                "\n  counts, not costs.\n"
+            )
 
     asyncio.run(_usage())
 
@@ -1151,8 +1162,8 @@ def main():
         help="Max pages to crawl (default: 100)",
     )
     sub.add_argument(
-        "--provider", choices=["claude", "codex"], default=None,
-        help="Subscription to think with (default: the one in your config, else claude)",
+        "--provider", choices=["claude", "codex", "ollama"], default=None,
+        help="Inference provider (default: the one in your config)",
     )
     sub.add_argument("--model", default=None, help="Model for this provider (default: provider default)")
     sub.add_argument(
@@ -1175,8 +1186,8 @@ def main():
     sub = subparsers.add_parser("status", help="Show pipeline status")
     sub.add_argument(
         "--check", action="store_true",
-        help="Also check the configured brain now (Codex: CLI version, isolation "
-             "and login; Claude: CLI isolation flags; no model call)",
+        help="Check the configured brain now (Ollama: local server/model; "
+             "Codex: CLI/login; Claude: CLI flags; no model call)",
     )
     sub.set_defaults(func=cmd_status)
 
@@ -1299,7 +1310,7 @@ def main():
     sub.set_defaults(func=cmd_precleared_key)
 
     # sellbird usage
-    sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude or Codex)")
+    sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude, Codex or Ollama)")
     sub.add_argument("--days", type=int, default=30, help="Breakdown window (default: 30)")
     sub.set_defaults(func=cmd_usage)
 

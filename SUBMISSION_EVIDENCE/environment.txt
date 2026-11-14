@@ -1,0 +1,2 @@
+Python 3.14.7
+7eb8aba Complete local Ollama AI sales agent migration

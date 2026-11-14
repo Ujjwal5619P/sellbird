@@ -88,6 +88,7 @@
       <div class="nav-label">Pipeline</div>
       <button onclick="showTab('signals', this)"><svg class="icon" aria-hidden="true"><use href="#i-signals"/></svg><span class="label">Signals</span><span class="nav-count" id="nav-signals"></span></button>
       <button onclick="showTab('discover', this)"><svg class="icon" aria-hidden="true"><use href="#i-discover"/></svg><span class="label">Discover</span></button>
+      <button onclick="showTab('products', this)"><svg class="icon" aria-hidden="true"><use href="#i-companies"/></svg><span class="label">Products & research</span></button>
       <button onclick="showTab('companies', this)"><svg class="icon" aria-hidden="true"><use href="#i-companies"/></svg><span class="label">Companies</span></button>
       <button onclick="showTab('prospects', this)"><svg class="icon" aria-hidden="true"><use href="#i-contacts"/></svg><span class="label">Contacts</span></button>
       <button onclick="showTab('campaigns', this)"><svg class="icon" aria-hidden="true"><use href="#i-campaigns"/></svg><span class="label">Campaigns</span></button>
@@ -247,6 +248,55 @@
     </div>
   </div>
   <div id="discover-result"></div>
+</div>
+
+<!-- Local multi-product workspace -->
+<div id="products" class="section">
+  <div class="section-head"><div><h2>Products & research</h2><p>Manage multiple products and keep downloaded prospect research in the local database.</p></div></div>
+  <div class="grid-main">
+    <div><div class="subhead">Product catalogue</div><div id="local-products-list" class="card"><p class="desc">Loading products…</p></div></div>
+    <aside>
+      <div class="subhead" id="local-product-form-title">Add a product</div>
+      <div class="card">
+        <input type="hidden" id="local-product-id">
+        <div class="form-group"><label class="form-label" for="local-product-name">Product name</label><input class="form-input" id="local-product-name" maxlength="160" placeholder="e.g. Security Audit Platform"></div>
+        <div class="form-group"><label class="form-label" for="local-product-description">Description</label><textarea class="form-input" id="local-product-description" rows="3" placeholder="What does it do?"></textarea></div>
+        <div class="form-group"><label class="form-label" for="local-product-pricing">Pricing</label><input class="form-input" id="local-product-pricing" placeholder="Pricing or leave blank"></div>
+        <div class="form-group"><label class="form-label" for="local-product-benefits">Key benefits (one per line)</label><textarea class="form-input" id="local-product-benefits" rows="3"></textarea></div>
+        <div class="form-group"><label class="form-label" for="local-product-icp">Product-specific ICP (JSON)</label><textarea class="form-input" id="local-product-icp" rows="4" placeholder='{"industries":["SaaS"],"company_size":"10-200","roles":["CTO"]}'></textarea></div>
+        <div class="btn-group"><button class="btn btn-primary" onclick="saveLocalProduct()">Save product</button><button class="btn btn-secondary" onclick="resetLocalProductForm()">Clear</button></div>
+      </div>
+    </aside>
+  </div>
+  <div class="subhead">Local AI sales workflows</div>
+  <div class="card" id="local-workflow-card">
+    <p class="lede">Run all eight sales workflows using the configured local Ollama model. Outputs are saved in SQLite. Email generation creates drafts only; nothing is sent.</p>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label" for="workflow-product">Product</label><select class="form-input" id="workflow-product"><option value="">Select product</option></select></div>
+      <div class="form-group"><label class="form-label" for="workflow-name">Workflow</label><select class="form-input" id="workflow-name">
+        <option value="business_profile">Business profile generation</option><option value="icp">Product-specific ICP generation</option><option value="prospect_research">Prospect research (downloaded data only)</option><option value="buying_signals">Buying-signal classification</option><option value="problem_statement">Problem statement generation</option><option value="personalized_email">Personalised email draft</option><option value="prospect_score">Prospect scoring</option><option value="reply_classification">Reply classification</option>
+      </select></div>
+      <div class="form-group"><label class="form-label" for="workflow-prospect">Prospect ID (when applicable)</label><input class="form-input" id="workflow-prospect" placeholder="Existing local prospect ID"></div>
+    </div>
+    <div class="form-group"><label class="form-label" for="workflow-company">Company information / conversation sample</label><textarea class="form-input" id="workflow-company" rows="3" placeholder="Paste company facts for business profile, or reply/conversation text for reply classification…"></textarea></div>
+    <div class="form-group"><label class="form-label" for="workflow-input">Additional context (JSON)</label><textarea class="form-input" id="workflow-input" rows="3" placeholder='{"notes":"Relevant verified details"}'>{}</textarea></div>
+    <div class="btn-group"><button class="btn btn-primary" id="workflow-run-btn" onclick="runLocalWorkflow()">Run locally with Ollama</button><button class="btn btn-secondary" onclick="loadWorkflowHistory()">Refresh history</button></div>
+    <div id="workflow-hardware" class="desc" style="margin-top:10px"></div>
+    <pre id="workflow-result" class="card" style="white-space:pre-wrap;overflow-wrap:anywhere;display:none;margin-top:12px"></pre>
+    <div id="workflow-history" style="margin-top:12px"></div>
+  </div>
+  <div class="subhead">Local research library</div>
+  <div class="card">
+    <p class="lede">Save text collected from permitted public sources. Documents are stored locally and can be used by later offline research workflows.</p>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label" for="research-product">Product</label><select class="form-input" id="research-product"><option value="">General research</option></select></div>
+      <div class="form-group"><label class="form-label" for="research-title">Document title</label><input class="form-input" id="research-title" placeholder="Company page / prospect notes"></div>
+    </div>
+    <div class="form-group"><label class="form-label" for="research-url">Source URL (optional)</label><input class="form-input" id="research-url" placeholder="https://example.com/about"></div>
+    <div class="form-group"><label class="form-label" for="research-content">Downloaded research text</label><textarea class="form-input" id="research-content" rows="5" placeholder="Paste previously downloaded page text or research notes…"></textarea></div>
+    <div class="btn-group"><button class="btn btn-primary" onclick="saveResearchDocument()">Save research locally</button><button class="btn btn-secondary" onclick="loadResearchDocuments()">Refresh library</button></div>
+    <div id="research-documents" style="margin-top:16px"></div>
+  </div>
 </div>
 
 <!-- Companies -->

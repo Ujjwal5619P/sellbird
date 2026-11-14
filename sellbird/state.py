@@ -558,10 +558,78 @@ MIGRATIONS: list[str] = [
     ALTER TABLE conversations ADD COLUMN mailbox_id TEXT DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_outbox_mailbox_sent ON outbox(mailbox_id, status, sent_at);
     """,
+    # ── v17: local Ollama inference usage accounting ──
+    """
+    -- Keep local-model calls separate from Claude and Codex subscription calls.
+    ALTER TABLE usage_log ADD COLUMN ollama_calls INTEGER DEFAULT 0;
+    """,
+
+    # ── v18: local multi-product sales workspace ──
+    """
+    CREATE TABLE IF NOT EXISTS products (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        pricing TEXT NOT NULL DEFAULT '',
+        key_benefits_json TEXT NOT NULL DEFAULT '[]',
+        objection_responses_json TEXT NOT NULL DEFAULT '{}',
+        icp_json TEXT NOT NULL DEFAULT '{}',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_products_name ON products(LOWER(name));
+
+    CREATE TABLE IF NOT EXISTS prospect_products (
+        prospect_id TEXT NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+        product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        score INTEGER NOT NULL DEFAULT 0,
+        research_notes TEXT NOT NULL DEFAULT '',
+        problem_statement TEXT NOT NULL DEFAULT '',
+        buying_signals_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'new',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (prospect_id, product_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_prospect_products_product ON prospect_products(product_id, score DESC);
+
+    CREATE TABLE IF NOT EXISTS research_documents (
+        id TEXT PRIMARY KEY,
+        company_id TEXT DEFAULT '',
+        prospect_id TEXT DEFAULT '',
+        product_id TEXT DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        source_url TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL,
+        content_hash TEXT NOT NULL UNIQUE,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_research_documents_product ON research_documents(product_id, downloaded_at DESC);
+    """,
+
+
+    # v19: audit history for local-only AI workflows
+    """
+    CREATE TABLE IF NOT EXISTS local_workflow_runs (
+      id TEXT PRIMARY KEY, workflow TEXT NOT NULL, product_id TEXT NOT NULL DEFAULT '',
+      prospect_id TEXT NOT NULL DEFAULT '', input_json TEXT NOT NULL DEFAULT '{}',
+      output_json TEXT NOT NULL DEFAULT '{}', provider TEXT NOT NULL DEFAULT 'ollama',
+      model TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'completed',
+      error TEXT NOT NULL DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_workflow_runs_created ON local_workflow_runs(created_at DESC);
+    """,
+
 ]
 
-BRAIN_PROVIDERS = ("claude", "codex")
-_USAGE_LOG_COLUMN = {"claude": "claude_calls", "codex": "codex_calls"}
+BRAIN_PROVIDERS = ("claude", "codex", "ollama")
+_USAGE_LOG_COLUMN = {
+    "claude": "claude_calls",
+    "codex": "codex_calls",
+    "ollama": "ollama_calls",
+}
 
 # When a company was last profiled: the newer of the explicit check stamp
 # (set on every attempt, reachable or not) and its latest profile observation
@@ -2781,11 +2849,13 @@ class StateManager:
             ) as cursor:
                 auto_reply_handoffs = (await cursor.fetchone())[0]
             async with db.execute(
-                "SELECT claude_calls, codex_calls FROM usage_log WHERE date = ?", (today,)
+                "SELECT claude_calls, codex_calls, ollama_calls "
+                "FROM usage_log WHERE date = ?", (today,)
             ) as cursor:
                 usage_row = await cursor.fetchone()
                 usage_today = (usage_row[0] or 0) if usage_row else 0
                 codex_today = (usage_row[1] or 0) if usage_row else 0
+                ollama_today = (usage_row[2] or 0) if usage_row else 0
 
         return {
             "prospects": prospect_counts,
@@ -2803,7 +2873,11 @@ class StateManager:
             "open_conversations": open_conversations,
             "auto_reply_handoffs": auto_reply_handoffs,
             "usage_today": usage_today,  # Claude calls (kept for compatibility)
-            "usage_today_by_provider": {"claude": usage_today, "codex": codex_today},
+            "usage_today_by_provider": {
+                "claude": usage_today,
+                "codex": codex_today,
+                "ollama": ollama_today,
+            },
             # Companies discovered but not yet read. The heartbeat profiles
             # these every cycle — it is free, so it never competes with the
             # Claude budget the rest of the loop is rationing.

@@ -1,0 +1,15 @@
+Product: MediaGuard
+Saved research documents: 2
+
+LOCAL WORKFLOW ACCEPTANCE TEST
+PASS business_profile | HTTP 200 | provider: ollama | model: qwen3:4b
+PASS icp | HTTP 200 | provider: ollama | model: qwen3:4b
+PASS prospect_research | HTTP 200 | provider: ollama | model: qwen3:4b
+PASS buying_signals | HTTP 200 | provider: ollama | model: qwen3:4b
+PASS problem_statement | HTTP 200 | provider: ollama | model: qwen3:4b
+PASS personalized_email | HTTP 200 | provider: ollama | model: qwen3:4b
+PASS prospect_score | HTTP 200 | provider: ollama | model: qwen3:4b
+PASS reply_classification | HTTP 200 | provider: ollama | model: qwen3:4b
+
+RESULT: 8/8 passed; 0/8 failed
+No email delivery was invoked.

@@ -399,6 +399,144 @@ function toggleVisibility(inputId) {
   el.type = el.type === 'password' ? 'text' : 'password';
 }
 
+
+// ── Local multi-product workspace ──
+let _localProducts = [];
+document.addEventListener('change', e => { if (e.target && e.target.id === 'research-product') loadResearchDocuments(); });
+
+function resetLocalProductForm() {
+  ['local-product-id','local-product-name','local-product-description','local-product-pricing','local-product-benefits','local-product-icp'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
+  document.getElementById('local-product-form-title').textContent = 'Add a product';
+}
+
+function editLocalProduct(id) {
+  const p = _localProducts.find(x => x.id === id); if (!p) return;
+  document.getElementById('local-product-id').value = p.id;
+  document.getElementById('local-product-name').value = p.name || '';
+  document.getElementById('local-product-description').value = p.description || '';
+  document.getElementById('local-product-pricing').value = p.pricing || '';
+  document.getElementById('local-product-benefits').value = (p.key_benefits || []).join('\n');
+  document.getElementById('local-product-icp').value = JSON.stringify(p.icp || {}, null, 2);
+  document.getElementById('local-product-form-title').textContent = 'Edit product';
+  document.getElementById('local-product-name').focus();
+}
+
+async function loadLocalProducts() {
+  const el = document.getElementById('local-products-list');
+  const rows = await api('/api/products');
+  if (!Array.isArray(rows)) { el.innerHTML = '<p class="desc">Could not load products. Check migration v18 and restart the dashboard.</p>'; return; }
+  _localProducts = rows;
+  el.innerHTML = rows.length ? rows.map(p => `
+    <div style="padding:12px 0;border-bottom:1px solid var(--line)">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center">
+        <b>${ce(p.name)}</b><span class="badge ${p.is_active ? 't-good' : 't-idle'}">${p.is_active ? 'Active' : 'Inactive'}</span>
+      </div>
+      <p class="desc">${ce(p.description || 'No description')}</p>
+      <p class="desc"><b>ICP:</b> ${ce(JSON.stringify(p.icp || {}))}</p>
+      <button class="btn btn-secondary btn-sm" onclick="editLocalProduct('${ce(p.id)}')">Edit</button>
+      <button class="btn btn-ghost btn-sm" onclick="toggleLocalProduct('${ce(p.id)}')">${p.is_active ? 'Deactivate' : 'Activate'}</button>
+    </div>`).join('') : '<p class="desc">No products yet. Add your first product using the form.</p>';
+  const select = document.getElementById('research-product');
+  if (select) select.innerHTML = '<option value="">General research</option>' + rows.filter(p => p.is_active).map(p => `<option value="${ce(p.id)}">${ce(p.name)}</option>`).join('');
+  const wf = document.getElementById('workflow-product');
+  if (wf) { const keep = wf.value; wf.innerHTML = '<option value="">Select product</option>' + rows.filter(p => p.is_active).map(p => `<option value="${ce(p.id)}">${ce(p.name)}</option>`).join(''); if (keep) wf.value = keep; }
+  loadWorkflowHardware();
+}
+
+async function saveLocalProduct() {
+  const id = document.getElementById('local-product-id').value;
+  const name = document.getElementById('local-product-name').value.trim();
+  let icp = {};
+  try { icp = JSON.parse(document.getElementById('local-product-icp').value || '{}'); }
+  catch { showToast('ICP must be valid JSON.', 'error'); return; }
+  const body = {
+    name,
+    description: document.getElementById('local-product-description').value,
+    pricing: document.getElementById('local-product-pricing').value,
+    key_benefits: document.getElementById('local-product-benefits').value.split('\n').map(x => x.trim()).filter(Boolean),
+    icp
+  };
+  if (!name) { showToast('Enter a product name.', 'error'); return; }
+  const r = await api(id ? '/api/products/' + encodeURIComponent(id) : '/api/products', {
+    method: id ? 'PUT' : 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+  });
+  if (!r || r.error) { showToast((r && r.error) || 'Could not save product.', 'error'); return; }
+  showToast('Product saved locally.', 'success'); resetLocalProductForm(); await loadLocalProducts();
+}
+
+async function toggleLocalProduct(id) {
+  const p = _localProducts.find(x => x.id === id); if (!p) return;
+  const r = await api('/api/products/' + encodeURIComponent(id), {
+    method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({is_active:!p.is_active})
+  });
+  if (!r || r.error) { showToast((r && r.error) || 'Could not update product.', 'error'); return; }
+  await loadLocalProducts();
+}
+
+async function saveResearchDocument() {
+  const content = document.getElementById('research-content').value.trim();
+  if (!content) { showToast('Paste research text first.', 'error'); return; }
+  const body = {
+    product_id: document.getElementById('research-product').value,
+    title: document.getElementById('research-title').value.trim(),
+    source_url: document.getElementById('research-url').value.trim(),
+    content
+  };
+  const r = await api('/api/research/documents', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if (!r || r.error) { showToast((r && r.error) || 'Could not save research.', 'error'); return; }
+  document.getElementById('research-content').value = '';
+  showToast('Research saved in local SQLite.', 'success'); loadResearchDocuments();
+}
+
+async function loadResearchDocuments() {
+  const el = document.getElementById('research-documents'); if (!el) return;
+  const productId = document.getElementById('research-product')?.value || '';
+  const path = '/api/research/documents' + (productId ? '?product_id=' + encodeURIComponent(productId) : '');
+  const rows = await api(path);
+  if (!Array.isArray(rows)) { el.innerHTML = '<p class="desc">Research library unavailable.</p>'; return; }
+  el.innerHTML = rows.length ? '<div class="subhead">Saved documents (' + rows.length + ')</div>' + rows.map(d =>
+    `<div style="padding:9px 0;border-top:1px solid var(--line)"><b>${ce(d.title || 'Untitled research')}</b><div class="desc">${ce(d.source_url || 'No source URL')} · ${ce(d.downloaded_at || '')}</div><code>${ce((d.content_hash || '').slice(0,16))}</code></div>`
+  ).join('') : '<p class="desc">No saved research documents yet.</p>';
+}
+
+
+async function loadWorkflowHardware() {
+  const el = document.getElementById('workflow-hardware'); if (!el) return;
+  const d = await api('/api/local/hardware');
+  if (!d) { el.textContent = 'Hardware profile unavailable.'; return; }
+  el.textContent = `Local runtime: ${d.provider || 'not configured'} / ${d.model || 'unknown'} · RAM: ${d.ram_gb ?? 'unknown'} GB · CPU: ${d.cpu || 'unknown'} · GPU: ${d.gpu || 'unknown'} · Suggested: ${d.recommended_model}`;
+}
+
+async function runLocalWorkflow() {
+  const workflow = document.getElementById('workflow-name').value;
+  const productId = document.getElementById('workflow-product').value;
+  const resultEl = document.getElementById('workflow-result');
+  let input = {};
+  try { input = JSON.parse(document.getElementById('workflow-input').value || '{}'); }
+  catch { showToast('Additional context must be valid JSON.', 'error'); return; }
+  const body = {product_id: productId, prospect_id: document.getElementById('workflow-prospect').value.trim(), company_information: document.getElementById('workflow-company').value, conversation_sample: document.getElementById('workflow-company').value, input};
+  if (!['business_profile','reply_classification'].includes(workflow) && !productId) { showToast('Select a product first.', 'error'); return; }
+  const btn = document.getElementById('workflow-run-btn'); btn.disabled = true; btn.textContent = 'Running local model…';
+  resultEl.style.display = 'block'; resultEl.textContent = 'Waiting for Ollama…';
+  try {
+    const r = await api('/api/local/workflows/' + encodeURIComponent(workflow), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    resultEl.textContent = JSON.stringify(r || {error:'No response from local workflow API.'}, null, 2);
+    if (r && r.success) showToast('Workflow completed with local Ollama.', 'success');
+    else showToast((r && r.error) || 'Workflow failed. See result.', 'error');
+    loadWorkflowHistory();
+    if (workflow === 'icp' && r && r.success) loadLocalProducts();
+  } finally { btn.disabled = false; btn.textContent = 'Run locally with Ollama'; }
+}
+
+async function loadWorkflowHistory() {
+  const el = document.getElementById('workflow-history'); if (!el) return;
+  const rows = await api('/api/local/workflows/history');
+  if (!Array.isArray(rows)) { el.textContent = 'Workflow history unavailable.'; return; }
+  el.innerHTML = '<div class="subhead">Local workflow history (' + rows.length + ')</div>' + (rows.length ? rows.map(r => `<div style="padding:7px 0;border-top:1px solid var(--line)"><b>${ce(r.workflow)}</b> · ${ce(r.status)} · ${ce(r.model)} · ${ce(r.created_at || '')}${r.error ? `<div class="desc">${ce(r.error)}</div>` : ''}</div>`).join('') : '<p class="desc">No workflow runs yet.</p>');
+}
+
 // ── Tabs ──
 
 function showTab(id, btn) {
@@ -416,6 +554,7 @@ function loadCurrentTab() {
     case 'today': loadLiveStatus(); loadRenameNotice(); loadToday(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
     case 'signals': loadSignals(); break;
     case 'discover': loadDiscoverProviders(); break;
+    case 'products': loadLocalProducts(); loadResearchDocuments(); loadWorkflowHistory(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;

@@ -1,191 +1,285 @@
-<p align="center">
-  <a href="https://sellbird.ai">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/sellbird-wordmark-white.svg">
-      <img src="docs/brand/sellbird-wordmark.svg" alt="Sellbird" width="300">
-    </picture>
-  </a>
-</p>
+# Sellbird — Local AI Sales Agent
 
-<p align="center"><strong>The open-source outreach platform that runs on your Claude or ChatGPT plan.</strong></p>
+**EDXSO AI Engineer Intern Assignment 2**
+**Local multi-product AI sales agent using Ollama**
 
-<p align="center">
-Sellbird finds companies that need what you sell, finds the person who decides, checks their email address, writes each one a personal cold email, sends it and handles the replies.
-It runs on your own machine, and by default nothing goes out until you approve it.
-</p>
+Sellbird is an AI-assisted sales outreach platform. This assignment implementation adapts its AI inference layer to run locally using **Ollama and Qwen3:4B**, rather than relying on paid or cloud-hosted LLM inference.
 
-<p align="center">
-  <a href="https://github.com/ethanplusai/sellbird/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ethanplusai/sellbird?style=flat&logo=github&label=stars&color=244b62&cacheSeconds=3600"></a>
-  <a href="https://github.com/ethanplusai/sellbird/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/ethanplusai/sellbird/actions/workflows/tests.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-244b62"></a>
-  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-244b62?logo=python&logoColor=white">
-  <a href="https://sellbird.ai"><img alt="Hosted at sellbird.ai" src="https://img.shields.io/badge/hosted-sellbird.ai-244b62"></a>
-  <a href="https://sellbird.ai/harvey/"><img alt="Formerly Harvey" src="https://img.shields.io/badge/formerly-Harvey-8aa0ad"></a>
-</p>
+The application supports multiple products, product-specific customer profiles, locally stored prospect research, and eight AI-assisted sales workflows. Generated content is stored locally and email drafts remain subject to human approval.
 
-> **[Harvey is now Sellbird.](https://sellbird.ai/harvey/)** Same project, same history, new name. Already running Harvey? Your setup carries over: see [Upgrading from Harvey](#upgrading-from-harvey).
+> **Assignment implementation:** This repository contains a local Ollama inference migration and local workflow implementation. It originated from the upstream Sellbird project. See the upstream repository and retain its applicable licensing and attribution.
 
-**Prefer not to run it yourself? [sellbird.ai](https://sellbird.ai) is the hosted version, with sending domains, inboxes and warmup set up for you. It's in early access.**
+## 1. Key features
 
-![Sellbird's dashboard: the Today screen, a conversation that needs you, approving a drafted reply in the Outbox, the signals to confirm, searching contacts, then dark mode](docs/dashboard.gif)
+- Local LLM inference through Ollama.
+- Default local model: `qwen3:4b`.
+- Multiple product profiles with product-specific ICP information.
+- Local semantic embeddings using `all-MiniLM-L6-v2`.
+- SQLite-backed local workflow and research storage.
+- Hardware detection for RAM, CPU and GPU.
+- No automatic fallback to Claude, Codex, OpenAI, Anthropic or another hosted LLM provider.
+- Human approval before email sending.
+- Offline workflow acceptance testing after required models and research data have been downloaded.
 
-<sub>The demo data is invented: "Bookwell" selling online booking to roofers, dental practices and HVAC shops, on `.test` domains.</sub>
+## 2. Technology stack
 
-## What it does
-
-Sellbird is a pipeline you can run end to end, or stop at any step.
-
-| | What happens | More |
-|---|---|---|
-| **Find companies** | Searches for businesses that match your customer: free on OpenStreetMap, or on a paid source you pick. Every paid search shows its cost before it runs. | [Discovery](docs/signals-and-pipeline.md#1-discover--who-exists) |
-| **Learn why they'd buy** | Reads each company's own website for the buying signals you confirmed, like no online booking, ads running or a role they're hiring for. No model calls, no cost. | [Signals](docs/signals-and-pipeline.md) |
-| **Find who decides** | Finds the owner or manager named on the company's own pages, two people per company at most. | [Enrich](docs/signals-and-pipeline.md#3-enrich--who-decides) |
-| **Check the address** | Learns the company's email pattern and verifies one address. Every address is marked verified, risky, guess or invalid, and only deliverable ones are ever sent to. | [Verify](docs/signals-and-pipeline.md#4-verify--can-you-reach-them) |
-| **Write and send** | Writes a short sequence for each person from what it found, then sends from your Gmail, Microsoft 365 or SMTP mailbox inside your daily limit and their office hours. | [Sending](docs/approval-and-sending.md) |
-| **Handle replies** | Reads every reply, drafts an answer, sets auto-replies aside, honours opt-outs at once, and hands you anything it shouldn't answer alone. | [Dashboard](docs/dashboard.md) |
-
-Only want the list? Stop after verifying and run `sellbird export` for a sequencer-ready CSV of everything it found.
-
-```
-$ sellbird run
-
-============================================================
-Sellbird is online.
-============================================================
-Checking pipeline state...
-Decision: write_campaign (3 new prospects with no drafts)
-  handler   → Elena Park, Harbor Dental Studio     interested, answer drafted
-  handler   → Priya Nair, Highline Roofing         objection, answer drafted
-  writer    → 2-email sequence: Phoenix HVAC hiring a dispatcher
-  outbox    → 5 emails waiting for your approval
-Cycle complete. Sleeping for 15 minutes.
-```
-
-## No model API bill
-
-Sellbird thinks through the Claude Code CLI on your Claude Pro or Max plan, or through Codex on a ChatGPT plan. There's no API key and no per-token billing, and Sellbird throttles itself to leave room for your own work.
-
-| | |
+| Component | Technology |
 |---|---|
-| Claude Pro or Max, or a ChatGPT plan with Codex | the subscription you already have |
-| Finding businesses | **$0** on the default source, or about $0.37 per 1,000 on the cheapest paid one |
-| Reading their websites | **$0**: three HTTP requests each, no model call |
-| Writing and sending | your subscription and a mailbox (about $7 a month for Google Workspace) |
-| Prospecting tools | **None.** No Apollo, ZoomInfo, Clearbit or Clay. |
+| Application | Python |
+| Dashboard | Existing Sellbird web dashboard |
+| Backend | Existing Sellbird application and local workflow endpoints |
+| Local LLM runtime | Ollama |
+| LLM model | Qwen3:4B |
+| Embeddings | Sentence Transformers |
+| Embedding model | all-MiniLM-L6-v2 |
+| Database | SQLite |
+| Frontend | HTML, CSS and JavaScript |
 
-How the loop, the budget and the isolation work: [How Sellbird works](docs/how-it-works.md).
+## 3. Architecture
 
-## Quick start
+The local inference flow is:
 
-You need:
+1. The dashboard or acceptance test submits a workflow request.
+2. The application loads the selected product and its saved context.
+3. Local workflow logic prepares the prompt and relevant stored research.
+4. The Ollama adapter sends the inference request to the local Ollama service.
+5. Qwen3:4B generates the result on the local machine.
+6. The application stores workflow results and history in SQLite.
+7. The dashboard displays the generated result for review.
 
-- **Python 3.11 or newer.** macOS ships 3.9, so run `brew install python@3.13` first if `python3 --version` says so.
-- **Claude Pro or Max** with the CLI signed in (`claude login`), or a **ChatGPT plan with the Codex CLI** ([Codex setup](docs/codex.md)).
-- **A mailbox to send from**, ideally Google Workspace on a separate sending domain. [Microsoft 365](docs/microsoft365.md) and SMTP work too.
-- **Warmup on that mailbox.** We recommend [TrulyInbox](https://trulyinbox.com/?via=sellbird): it warms a new mailbox before cold email and keeps it out of spam after, and Sellbird reads its inbox rate to tell you when you're ready.
+The embedding workflow loads its model from the local `models/all-MiniLM-L6-v2` directory and stores product-scoped embedding data in SQLite.
 
-### Let Claude set it up
+```text
+Dashboard / Acceptance Test
+            |
+            v
+      Local Workflow Layer
+            |
+       Product Context
+       Saved Research
+            |
+            v
+       Ollama Adapter
+            |
+            v
+      Ollama — Qwen3:4B
+            |
+            v
+      Generated Result
+            |
+            v
+       SQLite Storage
+            |
+            v
+        Dashboard
+```
 
-```bash
-git clone https://github.com/ethanplusai/sellbird.git
+## 4. Eight AI sales workflows
+
+The local workflow interface is available under **Products & research → Local AI sales workflows**.
+
+| No. | Workflow | Purpose |
+|---:|---|---|
+| 1 | Business profile generation | Generates a business profile from stored company information. |
+| 2 | ICP generation | Creates an Ideal Customer Profile for the selected product. |
+| 3 | Prospect research | Analyses previously saved local prospect research. |
+| 4 | Buying-signal classification | Identifies relevant buying signals from the supplied context. |
+| 5 | Problem statement generation | Generates prospect-specific problem statements. |
+| 6 | Personalised email generation | Drafts a personalised email using product and prospect context. |
+| 7 | Prospect scoring | Evaluates prospect fit using the available context. |
+| 8 | Reply classification | Classifies supplied sample conversation or reply text. |
+
+All eight workflows were tested through the local acceptance script. The acceptance test reported **8 passed and 0 failed**, with `ollama` and `qwen3:4b` shown as the inference provider and model.
+
+Email generation creates drafts; it does not mean an email was delivered.
+
+## 5. Multi-product support
+
+The Products & research dashboard supports creating and managing product profiles.
+
+Each product can have its own:
+- Product name and description.
+- Pricing information.
+- Key benefits.
+- Product-specific ICP information.
+- Saved research documents.
+- Workflow context.
+
+The workflow interface requires a product selection so the generated output can use the selected product's context.
+
+## 6. Local research and semantic embeddings
+
+The Local research library stores research text for later use.
+
+Research can be collected during an online research step and saved locally. Subsequent prospect research workflows can use the saved documents without requiring a new web search.
+
+The embedding implementation uses:
+- Sentence Transformers.
+- `all-MiniLM-L6-v2`.
+- Local model loading.
+- SQLite persistence.
+- Product-scoped semantic retrieval.
+
+See [LOCAL_EMBEDDINGS.md](LOCAL_EMBEDDINGS.md) for implementation and setup details.
+
+## 7. Installation and setup — Windows
+
+### Prerequisites
+
+- Python installed.
+- Git installed.
+- Ollama installed.
+- Sufficient RAM and storage for the selected local model.
+- Internet access for initial installation and model downloads.
+
+### Step 1 — Clone the repository
+
+```cmd
+git clone https://github.com/Ujjwal5619P/sellbird.git
 cd sellbird
-claude
 ```
 
-Then say **"set up Sellbird for me"**. The repo's `CLAUDE.md` turns Claude Code into the setup guide: it checks where you are, installs what's missing, asks what it needs and trains Sellbird on your product.
+### Step 2 — Install the application
 
-### Or do it yourself
+Use the repository's documented Python installation method and install the required dependencies.
 
-```bash
-# 1. Install. Use python3.13, not python3: on macOS bare python3 is 3.9.
-python3.13 -m venv .venv && source .venv/bin/activate && pip install -e .
-
-# 2. Add credentials. Every variable is documented inline.
-cp .env.example .env && $EDITOR .env
-
-# 3. Learn your product from your website (writes sellbird.local.yaml).
-sellbird train https://your-company.com
-
-# 4. Confirm what makes a good prospect.
-sellbird signals --confirm free
-
-# 5. Find businesses. The default source is free and needs no account.
-sellbird discover
-
-# 6. Open the dashboard and start the loop.
-sellbird dashboard          # prints a private link to http://127.0.0.1:5555
-sellbird run
+```cmd
+python -m pip install -e .
 ```
 
-On Linux you can also [run it with Docker](docs/docker.md).
+### Step 3 — Download and verify the Ollama model
 
-## Nothing sends without you
-
-Every outgoing email waits in the Outbox for your approval until you turn on autopilot yourself. Before anything leaves, a pre-send check with no model involved rejects unfilled merge tags, banned phrases, overlong emails, extra links and undeliverable addresses. Autopilot still holds back any email that links to a domain that isn't yours or quotes Sellbird's own instructions. `sellbird sending pause` stops everything at once.
-
-Details: [Approval and sending](docs/approval-and-sending.md) and [Legal and deliverability](docs/deliverability.md).
-
-## Upgrading from Harvey
-
-Harvey was renamed Sellbird in 0.4.0. Your configuration, data and dashboard sign-in carry over:
-
-```bash
-git pull
-pip install -e .        # once, to get the new `sellbird` command
-sellbird dashboard
+```cmd
+ollama pull qwen3:4b
+ollama list
 ```
 
-- On first run Sellbird renames `harvey.local.yaml` to `sellbird.local.yaml` and `data/harvey.db` (and its log) to `data/sellbird.*`. It never overwrites a file that already exists under the new name, and waits if a Harvey process is still running from the folder. Stop that first.
-- `HARVEY_*` environment variables still work when the `SELLBIRD_*` one isn't set; rename them when convenient.
-- The `harvey` command and `python -m harvey` still work for now and say they moved. They will be removed in a later release.
-- If you edited the tracked `harvey.yaml` directly, `git pull` stops with "your local changes would be overwritten". Run `git stash`, `git pull`, then `git stash pop`. Git carries your edits into `sellbird.yaml`. If it reports a conflict there, keep your lines, delete the conflict markers, and run `git stash drop`. Better still, put your settings in `sellbird.local.yaml`, which git never touches.
-- Docker: the service is now `sellbird`. Run `docker compose down`, `git pull`, `docker compose build`, then `docker compose up -d`. `HARVEY_UID`/`HARVEY_GID` are still read.
+Make sure the model is available locally before running the application.
 
-Links to `github.com/ethanplusai/harvey` keep working: GitHub redirects them here.
+### Step 4 — Download the local embedding model
 
-## Where your files live
+Follow the instructions in [LOCAL_EMBEDDINGS.md](LOCAL_EMBEDDINGS.md).
 
-Your config, knowledge and data live in one home folder. Which one, first match wins:
+The embedding model must be downloaded before the offline test.
 
-1. `SELLBIRD_HOME`, if you set it (the Docker image sets it to `/app`).
-2. A checkout: the checkout folder itself, as before.
-3. Otherwise, for an installed package (`pip` or `pipx`), your user data folder:
+### Step 5 — Start the dashboard
 
-| | Home folder |
+```cmd
+python -m sellbird dashboard
+```
+
+Open:
+
+```text
+http://127.0.0.1:5555
+```
+
+## 8. Running the acceptance tests
+
+Start Ollama and ensure `qwen3:4b` is available.
+
+Run the local workflow acceptance test:
+
+```cmd
+python sellbird_acceptance_test.py
+```
+
+Expected workflow names:
+
+```text
+business_profile
+icp
+prospect_research
+buying_signals
+problem_statement
+personalized_email
+prospect_score
+reply_classification
+```
+
+Expected result:
+
+```text
+RESULT: 8/8 passed; 0/8 failed
+No email delivery was invoked.
+```
+
+The acceptance script checks the workflow endpoints and reports the provider and model used.
+
+### Offline acceptance test
+
+After downloading the required model and embedding files and saving the research data:
+
+1. Keep the local Ollama service running.
+2. Keep the dashboard and required local services available.
+3. Disconnect the machine from the internet.
+4. Run the acceptance test again.
+
+```cmd
+python sellbird_acceptance_test.py
+```
+
+The offline test should use the locally available model and saved research. It must not silently fall back to a hosted LLM.
+
+See `SUBMISSION_EVIDENCE/offline_acceptance_test.txt` and the screenshots in `SUBMISSION_EVIDENCE/Screenshots/` for recorded test evidence.
+
+## 9. Hardware detection
+
+The local workflow dashboard displays detected hardware and a suggested model.
+
+The demonstration environment reported approximately:
+
+| Resource | Detected information |
 |---|---|
-| macOS | `~/Library/Application Support/sellbird` |
-| Windows | `%APPDATA%\sellbird` |
-| Linux | `~/.local/share/sellbird` (or `$XDG_DATA_HOME/sellbird`) |
+| RAM | 15.7 GB |
+| CPU | Intel64 Family 6 Model 154 |
+| GPU | NVIDIA GeForce RTX 2050 |
+| GPU memory | 4096 MiB |
+| Suggested model | qwen3:4b |
 
-Inside it are `sellbird.yaml` (and `sellbird.local.yaml` once you train), `.env`,
-`prompts/` and `skills/`, all yours to edit. An installed package copies the defaults in on
-first run and never overwrites them, so your edits survive upgrades. `data/` holds the
-database, the logs and the dashboard token.
+Model suitability depends on available memory, model quantization and the machine's runtime configuration.
 
-## Documentation
+## 10. Evidence and submission materials
 
-| Guide | What's in it |
-|---|---|
-| [How Sellbird works](docs/how-it-works.md) | The heartbeat loop, the subscription budget, project structure and the ideas behind it |
-| [Signals and the prospecting pipeline](docs/signals-and-pipeline.md) | The 29 signals, cohorts, and the discover, profile, enrich and verify stages |
-| [Skills and sub-agents](docs/skills-and-agents.md) | The editable sales playbooks and which agent uses which |
-| [Approval and sending](docs/approval-and-sending.md) | The Outbox, autopilot, office hours and email signatures |
-| [The dashboard and the data](docs/dashboard.md) | Every screen, how sign-in works, and how the data is stored |
-| [Configuration and commands](docs/configuration.md) | `.env`, `sellbird.yaml` and every command |
-| [Extensions](docs/extensions.md) | Adding routes, heartbeat steps and commands from a separate package |
-| [Using a ChatGPT plan (Codex)](docs/codex.md) | Running on Codex instead of Claude |
-| [Legal and deliverability](docs/deliverability.md) | The rules you're sending under, and warmup |
-| [Microsoft 365](docs/microsoft365.md) · [Precleared](docs/precleared.md) | Provider setup guides |
-| [Docker](docs/docker.md) · [Troubleshooting](docs/troubleshooting.md) · [Roadmap](docs/roadmap.md) | Running, fixing and what's next |
+The `SUBMISSION_EVIDENCE/` directory contains:
 
-## Contributing
+- `environment.txt` — environment information.
+- `ollama_models.txt` — locally available Ollama models.
+- `ollama_running.txt` — Ollama runtime evidence.
+- `offline_acceptance_test.txt` — acceptance test output.
+- `python_dependency_licenses.csv` — Python dependency license inventory.
+- `Screenshots/` — dashboard and test screenshots.
 
-Pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: it covers keeping real contact data out of the repo, test email, and signing off your commits. Found a security problem? Follow [SECURITY.md](SECURITY.md) instead of opening an issue.
+The dependency CSV is an inventory, not a substitute for reviewing each dependency's license and obligations.
 
-See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+## 11. Local inference and security boundaries
 
-## License
+The supported AI inference provider in this implementation is Ollama.
 
-Sellbird is licensed under the [GNU Affero General Public License v3.0](LICENSE). Harvey releases up to 0.3.x were released under MIT, and that code keeps its MIT notice in [NOTICE](NOTICE).
+- Configuration validation restricts the supported inference provider to Ollama.
+- The Brain entry point rejects unsupported inference providers.
+- There is no automatic cloud inference fallback.
+- The local embedding model is loaded from disk.
+- Workflow and research data are stored locally in SQLite.
+- Email drafts require human review; the acceptance test does not send emails.
 
-TrulyInbox links in this project are affiliate links: the maintainer may earn a commission, at no extra cost to you.
+**Important limitation:** This repository originated as a broader outreach platform and still contains legacy provider adapters and non-LLM integrations. The local inference changes do not establish that every external network integration or prospecting, enrichment, verification and email feature has been removed. Public research and other integrations may still involve network access. The offline acceptance test demonstrates the tested local workflows, not the removal of every network capability.
+
+Do not commit `.env` files, API credentials, dashboard tokens, runtime databases, local model weights or personal backups.
+
+## 12. Dependency and cost statement
+
+The tested AI inference workflows use a locally running Ollama model. They do not require a paid hosted LLM API for inference.
+
+Initial setup may require internet access to install dependencies and download model weights. External discovery or other integrations may have separate service requirements or costs; those are not represented as free local inference.
+
+Review the dependency license inventory and the upstream project's license before redistribution.
+
+## 13. Upstream project and license
+
+This implementation is based on the upstream Sellbird project:
+
+- Upstream repository: https://github.com/ethanplusai/sellbird
+- License: see the repository's `LICENSE` and `NOTICE` files.
+
+Retain the original copyright, attribution and applicable license notices when distributing modified source code.
