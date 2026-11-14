@@ -184,12 +184,18 @@ async def _test_claude(brain: Brain) -> bool:
 
 
 def _ask_brain_config() -> BrainConfig:
-    """Ask which subscription Sellbird thinks with. Claude is the default."""
-    _print_sellbird("I think with an AI subscription you already pay for:")
+    """Ask which inference provider Sellbird should use."""
+    _print_sellbird("Choose your AI inference provider:")
     print("    claude — your Claude plan, via Claude Code (default)")
     print("    codex  — your ChatGPT plan, via the Codex CLI")
+    print("    ollama — local inference using Ollama (no subscription required)")
+
     while True:
-        provider = _ask("Which one? (claude/codex)", default="claude").lower()
+        provider = _ask(
+            "Which one? (claude/codex/ollama)",
+            default="claude",
+        ).lower()
+
         if provider == "codex":
             from sellbird.codex import CodexError, require_supported_platform
             try:
@@ -197,18 +203,28 @@ def _ask_brain_config() -> BrainConfig:
             except CodexError as e:
                 print(f"    ({e})")
                 continue
-        if provider in ("claude", "codex"):
+
+        if provider in ("claude", "codex", "ollama"):
             break
-        print("    (type claude or codex)")
+        print("    (type claude, codex or ollama)")
+
     if provider == "codex":
         from sellbird.codex import SUGGESTED_MODEL
         print(f"    {SUGGESTED_MODEL} is the Codex model Sellbird has verified as text-only")
         print("    (no code-execution tools). Press Enter to use it, or type another.")
+    elif provider == "ollama":
+        from sellbird.ollama import DEFAULT_MODEL
+        print("    Ollama must be running locally and the model must be downloaded.")
+        print(f"    Default local model: {DEFAULT_MODEL}")
+
     while True:
         if provider == "codex":
             model = _ask("Model", default=SUGGESTED_MODEL, required=False)
+        elif provider == "ollama":
+            model = _ask("Ollama model", default=DEFAULT_MODEL, required=False)
         else:
             model = _ask("Model (leave blank for the default)", required=False)
+
         try:
             return BrainConfig(provider=provider, model=model)
         except ValidationError:
@@ -294,10 +310,12 @@ class SetupWizard:
         await self._print_summary()
 
     async def _check_prerequisites(self):
-        """Pick the brain provider and verify its CLI is installed and working."""
+        """Pick the inference provider and verify it is installed and working."""
         self.brain_config = _ask_brain_config()
         if self.brain_config.provider == "codex":
             await self._check_codex()
+        elif self.brain_config.provider == "ollama":
+            await self._check_ollama()
         else:
             await self._check_claude()
 
@@ -377,6 +395,47 @@ class SetupWizard:
             _print_sellbird("above says why (login, plan limits, or isolation).")
             if not _ask_yes_no("Continue anyway?", default=False):
                 raise SystemExit(1)
+        self._check_python_packages()
+
+    async def _check_ollama(self):
+        """Verify the local Ollama server, configured model, and inference."""
+        print("\\n  Checking local Ollama...", end=" ", flush=True)
+        state = StateManager()
+        await state.init_db()
+        brain = Brain(state, self.brain_config)
+
+        try:
+            reason = await brain.preflight()
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
+
+        if reason:
+            print("✗ Not ready")
+            _print_sellbird(f"Ollama check failed: {reason}")
+            _print_sellbird("Start Ollama and confirm the selected model is installed.")
+            raise SystemExit(1)
+
+        print("✓ Connected")
+        print("  Testing local model inference...", end=" ", flush=True)
+        try:
+            working = await _test_claude(brain)
+        except Exception as e:
+            working = False
+            logger.exception("Ollama setup inference test failed")
+
+        if working:
+            print("✓ Working")
+        else:
+            print("✗ Failed")
+            _print_sellbird(
+                "Ollama is reachable, but the selected model did not return "
+                "the expected test response."
+            )
+            _print_sellbird(
+                "Check that the model is available with `ollama list`, then retry setup."
+            )
+            raise SystemExit(1)
+
         self._check_python_packages()
 
     def _check_python_packages(self):
@@ -641,12 +700,18 @@ class SetupWizard:
         """Configure Sellbird's operational behavior."""
         _print_sellbird("Last thing — a few settings for how I operate.\n")
 
-        # Usage limit
-        print("  I track my own Claude usage so I don't eat your whole daily quota.")
-        usage_pct = _ask(
-            "Max % of daily Claude usage I can consume",
-            default="80",
-        )
+        # Usage limit. Ollama is local and does not consume a Claude/Codex
+        # subscription quota; retain this setting for compatibility with
+        # configurations that may later switch providers.
+        if self.brain_config.provider == "ollama":
+            print("  Ollama runs locally and does not consume a Claude/Codex subscription quota.")
+            usage_pct = "80"
+        else:
+            print("  I track my own Claude usage so I don't eat your whole daily quota.")
+            usage_pct = _ask(
+                "Max % of daily Claude usage I can consume",
+                default="80",
+            )
         try:
             usage_pct = min(100.0, max(1.0, float(usage_pct)))
         except ValueError:
@@ -925,11 +990,17 @@ class SetupWizard:
 ╚══════════════════════════════════════════════════════════╝
 """)
 
-        # Show what's configured
+        # Show the configured inference provider without requiring an
+        # external CLI when local Ollama is selected.
+        if self.brain_config.provider == "ollama":
+            brain_check = ("Ollama (local model)", True)
+        elif self.brain_config.provider == "codex":
+            brain_check = ("Codex CLI (ChatGPT plan)", _check_codex_cli())
+        else:
+            brain_check = ("Claude Code CLI", _check_claude_cli())
+
         checks = {
-            ("Codex CLI (ChatGPT plan)" if self.brain_config.provider == "codex"
-             else "Claude Code CLI"): (_check_codex_cli() if self.brain_config.provider == "codex"
-                                      else _check_claude_cli()),
+            brain_check[0]: brain_check[1],
             "Instantly API": bool(self.env_vars.get("INSTANTLY_API_KEY")),
             "LinkedIn": bool(self.env_vars.get("LINKEDIN_EMAIL")),
             "Cloudflare Crawl": bool(self.env_vars.get("CLOUDFLARE_ACCOUNT_ID")),

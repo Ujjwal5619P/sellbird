@@ -733,6 +733,566 @@ async def test_instantly(request: Request):
 COMPANIES_TAB_LIMIT = 2000
 
 
+
+# ── Local multi-product workspace ──
+# SELLBIRD_LOCAL_MULTIPRODUCT_V1
+def _product_payload(row):
+    item = dict(row)
+    for column, key, fallback in (
+        ("key_benefits_json", "key_benefits", []),
+        ("objection_responses_json", "objection_responses", {}),
+        ("icp_json", "icp", {}),
+    ):
+        try:
+            item[key] = json.loads(item.pop(column) or json.dumps(fallback))
+        except (TypeError, ValueError):
+            item[key] = fallback
+    item["is_active"] = bool(item.get("is_active", 0))
+    return item
+
+
+@app.get("/api/products")
+async def list_local_products():
+    state = _state()
+    await state.init_db()
+    rows = await query_db("SELECT * FROM products ORDER BY is_active DESC, name COLLATE NOCASE")
+    return [_product_payload(row) for row in rows]
+
+
+@app.post("/api/products")
+async def create_local_product(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Request body must be valid JSON."}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Request body must be a JSON object."}, status_code=400)
+    name = str(body.get("name") or "").strip()
+    if not name or len(name) > 160:
+        return JSONResponse({"error": "Product name is required (maximum 160 characters)."}, status_code=400)
+    benefits = body.get("key_benefits", [])
+    objections = body.get("objection_responses", {})
+    icp = body.get("icp", {})
+    if not isinstance(benefits, list) or not isinstance(objections, dict) or not isinstance(icp, dict):
+        return JSONResponse({"error": "key_benefits must be a list; objection_responses and icp must be objects."}, status_code=400)
+    product_id = uuid.uuid4().hex[:12]
+    state = _state()
+    await state.init_db()
+    try:
+        async with state._connect() as db:
+            await db.execute(
+                """INSERT INTO products
+                   (id, name, description, pricing, key_benefits_json,
+                    objection_responses_json, icp_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (product_id, name, str(body.get("description") or "")[:12000],
+                 str(body.get("pricing") or "")[:2000], json.dumps(benefits),
+                 json.dumps(objections), json.dumps(icp)),
+            )
+            await db.commit()
+    except Exception as exc:
+        if "unique" in str(exc).lower():
+            return JSONResponse({"error": "A product with that name already exists."}, status_code=409)
+        logger.exception("Could not create local product")
+        return JSONResponse({"error": "Could not save product."}, status_code=500)
+    rows = await query_db("SELECT * FROM products WHERE id = ?", (product_id,))
+    return _product_payload(rows[0]) if rows else JSONResponse({"error": "Product saved but could not be read."}, status_code=500)
+
+
+@app.put("/api/products/{product_id}")
+async def update_local_product(product_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Request body must be valid JSON."}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Request body must be a JSON object."}, status_code=400)
+    state = _state()
+    await state.init_db()
+    existing = await query_db("SELECT * FROM products WHERE id = ?", (product_id,))
+    if not existing:
+        return JSONResponse({"error": "Product not found."}, status_code=404)
+    old = existing[0]
+    name = str(body.get("name", old["name"]) or "").strip()
+    if not name or len(name) > 160:
+        return JSONResponse({"error": "Product name is required (maximum 160 characters)."}, status_code=400)
+    benefits = body.get("key_benefits", json.loads(old["key_benefits_json"] or "[]"))
+    objections = body.get("objection_responses", json.loads(old["objection_responses_json"] or "{}"))
+    icp = body.get("icp", json.loads(old["icp_json"] or "{}"))
+    if not isinstance(benefits, list) or not isinstance(objections, dict) or not isinstance(icp, dict):
+        return JSONResponse({"error": "key_benefits must be a list; objection_responses and icp must be objects."}, status_code=400)
+    active = body.get("is_active", old["is_active"])
+    if not isinstance(active, (bool, int)):
+        return JSONResponse({"error": "is_active must be true or false."}, status_code=400)
+    try:
+        async with state._connect() as db:
+            await db.execute(
+                """UPDATE products SET name=?, description=?, pricing=?,
+                   key_benefits_json=?, objection_responses_json=?, icp_json=?,
+                   is_active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                (name, str(body.get("description", old["description"]) or "")[:12000],
+                 str(body.get("pricing", old["pricing"]) or "")[:2000],
+                 json.dumps(benefits), json.dumps(objections), json.dumps(icp),
+                 int(bool(active)), product_id),
+            )
+            await db.commit()
+    except Exception as exc:
+        if "unique" in str(exc).lower():
+            return JSONResponse({"error": "A product with that name already exists."}, status_code=409)
+        logger.exception("Could not update local product")
+        return JSONResponse({"error": "Could not update product."}, status_code=500)
+    rows = await query_db("SELECT * FROM products WHERE id = ?", (product_id,))
+    return _product_payload(rows[0]) if rows else JSONResponse({"error": "Product could not be read."}, status_code=500)
+
+
+@app.post("/api/prospects/{prospect_id}/products/{product_id}")
+async def attach_product_to_prospect(prospect_id: str, product_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    state = _state()
+    await state.init_db()
+    prospect = await query_db("SELECT id FROM prospects WHERE id = ?", (prospect_id,))
+    product = await query_db("SELECT id FROM products WHERE id = ? AND is_active = 1", (product_id,))
+    if not prospect:
+        return JSONResponse({"error": "Prospect not found."}, status_code=404)
+    if not product:
+        return JSONResponse({"error": "Active product not found."}, status_code=404)
+    score = max(0, min(100, int(body.get("score", 0) or 0)))
+    signals = body.get("buying_signals", [])
+    if not isinstance(signals, list):
+        signals = []
+    async with state._connect() as db:
+        await db.execute(
+            """INSERT INTO prospect_products (prospect_id, product_id, score, research_notes,
+               problem_statement, buying_signals_json, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'new')
+               ON CONFLICT(prospect_id, product_id) DO UPDATE SET
+                 score=excluded.score, research_notes=excluded.research_notes,
+                 problem_statement=excluded.problem_statement,
+                 buying_signals_json=excluded.buying_signals_json,
+                 updated_at=CURRENT_TIMESTAMP""",
+            (prospect_id, product_id, score, str(body.get("research_notes") or "")[:12000],
+             str(body.get("problem_statement") or "")[:6000], json.dumps(signals)),
+        )
+        await db.commit()
+    return {"success": True, "prospect_id": prospect_id, "product_id": product_id}
+
+
+@app.post("/api/research/documents")
+async def save_local_research_document(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Request body must be valid JSON."}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Request body must be a JSON object."}, status_code=400)
+    content = str(body.get("content") or "").strip()
+    if not content:
+        return JSONResponse({"error": "Research content is required."}, status_code=400)
+    if len(content) > 500000:
+        return JSONResponse({"error": "Research content exceeds 500 KB."}, status_code=413)
+    import hashlib
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    document_id = uuid.uuid4().hex[:12]
+    state = _state()
+    await state.init_db()
+    metadata = body.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    async with state._connect() as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO research_documents
+               (id, company_id, prospect_id, product_id, title, source_url,
+                content, content_hash, metadata_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (document_id, str(body.get("company_id") or "")[:80],
+             str(body.get("prospect_id") or "")[:80], str(body.get("product_id") or "")[:80],
+             str(body.get("title") or "")[:300], str(body.get("source_url") or "")[:2000],
+             content, digest, json.dumps(metadata)),
+        )
+        await db.commit()
+    rows = await query_db("SELECT id, company_id, prospect_id, product_id, title, source_url, content_hash, downloaded_at FROM research_documents WHERE content_hash = ?", (digest,))
+    return rows[0] if rows else {"success": True, "content_hash": digest}
+
+
+
+# SELLBIRD_PUBLIC_RESEARCH_FETCH_V1
+async def _validate_public_research_url(raw_url: str) -> str:
+    import socket
+    from urllib.parse import urlsplit, urlunsplit
+    if not isinstance(raw_url, str) or len(raw_url) > 2048:
+        raise ValueError("URL is required and must be at most 2048 characters.")
+    parts = urlsplit(raw_url.strip())
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        raise ValueError("Only public http:// and https:// URLs are supported.")
+    if parts.username or parts.password or parts.port not in (None, 80, 443):
+        raise ValueError("Credentials and non-standard ports are not allowed in URLs.")
+    host = parts.hostname.rstrip(".").lower()
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".test", ".invalid")):
+        raise ValueError("Local and reserved hostnames are not allowed.")
+    try:
+        addresses = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            records = await asyncio.get_running_loop().getaddrinfo(
+                host, parts.port or (443 if parts.scheme == "https" else 80),
+                type=socket.SOCK_STREAM)
+            addresses = list({ipaddress.ip_address(r[4][0].split("%")[0]) for r in records})
+        except Exception as exc:
+            raise ValueError("Hostname could not be resolved to a public address.") from exc
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ValueError("Private, local, or reserved network addresses are blocked.")
+    netloc = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return urlunsplit((parts.scheme.lower(), netloc, parts.path or "/", parts.query, ""))
+
+
+async def _fetch_public_research_url(raw_url: str, max_bytes: int = 2_000_000):
+    import httpx
+    from urllib.parse import urljoin
+    current = raw_url
+    headers = {"User-Agent": "SellbirdLocalResearch/1.0", "Accept": "text/html,text/plain;q=0.9", "Accept-Encoding": "identity"}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=8.0),
+                                 follow_redirects=False, trust_env=False, verify=True) as client:
+        for _ in range(4):
+            current = await _validate_public_research_url(current)
+            async with client.stream("GET", current, headers=headers) as response:
+                if response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError("Redirect did not include a destination.")
+                    current = urljoin(current, location)
+                    continue
+                if response.status_code == 404:
+                    return 404, current, "", response.headers.get("content-type", "")
+                if not 200 <= response.status_code < 300:
+                    raise ValueError(f"Source returned HTTP {response.status_code}.")
+                content_type = response.headers.get("content-type", "").lower()
+                if not (content_type.startswith("text/html") or content_type.startswith("text/plain")
+                        or "application/xhtml+xml" in content_type):
+                    raise ValueError("URL did not return an HTML or plain-text page.")
+                length = response.headers.get("content-length", "")
+                if length.isdigit() and int(length) > max_bytes:
+                    raise ValueError("Page exceeds the download size limit.")
+                chunks, total = [], 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError("Page exceeds the download size limit.")
+                    chunks.append(chunk)
+                return response.status_code, current, b"".join(chunks).decode(
+                    response.encoding or "utf-8", "replace"), content_type
+    raise ValueError("Source redirected too many times.")
+
+
+def _extract_public_page_text(markup: str):
+    from html.parser import HTMLParser
+    class Extractor(HTMLParser):
+        SKIP = {"script", "style", "noscript", "svg", "canvas", "nav", "footer",
+                "header", "aside", "form", "button"}
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.skip = 0
+            self.in_title = False
+            self.title, self.parts = [], []
+        def handle_starttag(self, tag, attrs):
+            if tag in self.SKIP:
+                self.skip += 1
+            if tag == "title":
+                self.in_title = True
+            if tag in ("p", "div", "br", "li", "h1", "h2", "h3", "section"):
+                self.parts.append("\\n")
+        def handle_endtag(self, tag):
+            if tag in self.SKIP and self.skip:
+                self.skip -= 1
+            if tag == "title":
+                self.in_title = False
+            if tag in ("p", "div", "br", "li", "h1", "h2", "h3", "section"):
+                self.parts.append("\\n")
+        def handle_data(self, data):
+            if self.skip:
+                return
+            value = " ".join(data.split())
+            if value:
+                self.parts.append(value)
+                if self.in_title:
+                    self.title.append(value)
+    parser = Extractor()
+    parser.feed(markup)
+    return " ".join(parser.title).strip()[:300], "\\n".join(
+        part.strip() for part in parser.parts if part.strip())[:500000]
+
+
+@app.post("/api/research/fetch")
+async def fetch_public_research_document(request: Request):
+    """Fetch one robots.txt-permitted public page and store its text locally."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Request body must be valid JSON."}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Request body must be a JSON object."}, status_code=400)
+    product_id = str(body.get("product_id") or "").strip()
+    if not product_id:
+        return JSONResponse({"error": "Select a product before downloading research."}, status_code=400)
+    state = _state()
+    await state.init_db()
+    if not await query_db("SELECT id FROM products WHERE id=? AND is_active=1", (product_id,)):
+        return JSONResponse({"error": "Active product not found."}, status_code=404)
+    prospect_id = str(body.get("prospect_id") or "").strip()
+    if prospect_id and not await query_db("SELECT id FROM prospects WHERE id=?", (prospect_id,)):
+        return JSONResponse({"error": "Prospect not found."}, status_code=404)
+    raw_url = str(body.get("url") or "").strip()
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        from urllib.robotparser import RobotFileParser
+        safe_url = await _validate_public_research_url(raw_url)
+        parsed = urlsplit(safe_url)
+        robots_url = urlunsplit((parsed.scheme, parsed.netloc, "/robots.txt", "", ""))
+        robots_status, _, robots_text, _ = await _fetch_public_research_url(robots_url, 256_000)
+        rules = [] if robots_status == 404 else robots_text.splitlines()
+        robots = RobotFileParser()
+        robots.set_url(robots_url)
+        robots.parse(rules)
+        if not robots.can_fetch("SellbirdLocalResearch", safe_url):
+            return JSONResponse({"error": "Website robots.txt does not permit this page."}, status_code=403)
+        status, final_url, page, content_type = await _fetch_public_research_url(safe_url)
+        if status == 404:
+            return JSONResponse({"error": "Public page not found (HTTP 404)."}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Public research fetch failed: %s", exc)
+        return JSONResponse({"error": "Could not fetch this public page safely.",
+                             "detail": str(exc)[:500]}, status_code=502)
+    if "html" in content_type or "xhtml" in content_type:
+        extracted_title, content = _extract_public_page_text(page)
+    else:
+        extracted_title, content = "", page.strip()[:500000]
+    if len(content) < 40:
+        return JSONResponse({"error": "Page did not contain enough readable text."}, status_code=422)
+    import hashlib
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    document_id = uuid.uuid4().hex[:12]
+    title = str(body.get("title") or extracted_title or urlsplit(final_url).netloc).strip()[:300]
+    metadata = {"fetch_method": "httpx+html.parser", "content_type": content_type,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "robots_txt_checked": True, "robots_allowed": True,
+                "requested_url": safe_url, "final_url": final_url}
+    async with state._connect() as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO research_documents
+               (id, company_id, prospect_id, product_id, title, source_url,
+                content, content_hash, metadata_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (document_id, str(body.get("company_id") or "")[:80], prospect_id[:80],
+             product_id[:80], title, final_url[:2000], content, digest, json.dumps(metadata)))
+        await db.commit()
+    saved = await query_db(
+        "SELECT id, company_id, prospect_id, product_id, title, source_url, content_hash, downloaded_at "
+        "FROM research_documents WHERE product_id=? AND content_hash=?", (product_id, digest))
+    if not saved:
+        return JSONResponse({"error": "Fetched page could not be confirmed in local storage."}, status_code=500)
+    return {"success": True, "document": saved[0], "characters_saved": len(content),
+            "duplicate": saved[0]["id"] != document_id, "metadata": metadata}
+
+
+@app.get("/api/research/documents")
+async def list_local_research_documents(product_id: str = "", prospect_id: str = ""):
+    state = _state()
+    await state.init_db()
+    clauses, params = [], []
+    if product_id:
+        clauses.append("product_id = ?")
+        params.append(product_id)
+    if prospect_id:
+        clauses.append("prospect_id = ?")
+        params.append(prospect_id)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return await query_db(
+        "SELECT id, company_id, prospect_id, product_id, title, source_url, content_hash, downloaded_at FROM research_documents"
+        + where + " ORDER BY downloaded_at DESC LIMIT 500", tuple(params)
+    )
+
+
+
+# ── Local Ollama sales workflows ──
+# SELLBIRD_LOCAL_WORKFLOWS_V1
+_LOCAL_WORKFLOWS = {
+ "business_profile": "Create a business profile from supplied company information. JSON keys: summary, value_proposition, target_customers, differentiators, evidence_gaps.",
+ "icp": "Generate a product-specific ICP. JSON keys: industries (array), company_size, buyer_roles (array), geography, pains (array), buying_triggers (array), disqualifiers (array), rationale.",
+ "prospect_research": "Analyse ONLY supplied downloaded local research documents and prospect data. Do not browse or invent facts. JSON keys: verified_facts (array of {fact,source}), company_summary, likely_pains (array), evidence_gaps (array).",
+ "buying_signals": "Classify buying signals using ONLY evidence. JSON keys: signals (array of {signal,evidence,confidence,source}), overall_intent (low/medium/high), rationale.",
+ "problem_statement": "Write a concise prospect-specific problem statement grounded in evidence. JSON keys: problem_statement, supporting_evidence (array), assumptions (array).",
+ "personalized_email": "Draft a truthful personalised first-touch email based only on evidence. JSON keys: subject, body, personalization_sources (array), claims_to_verify (array). Draft only; never send.",
+ "prospect_score": "Score product-prospect fit 0-100 using evidence only. JSON keys: score, fit_band, factors (array of {factor,points,evidence}), missing_information (array), rationale.",
+ "reply_classification": "Classify supplied reply. JSON keys: intent (interested/objection/question/not_interested/ooo/wrong_person/unsubscribe/other), sentiment, key_points (array), recommended_next_step, draft_reply."
+}
+
+@app.get("/api/local/hardware")
+async def local_hardware_profile():
+    import platform, os, shutil
+    ram_gb=None
+    try:
+        import psutil
+        ram_gb=round(psutil.virtual_memory().total/(1024**3),1)
+    except Exception:
+        try:
+            if platform.system()=="Windows":
+                import ctypes
+                class M(ctypes.Structure):
+                    _fields_=[("dwLength",ctypes.c_ulong),("dwMemoryLoad",ctypes.c_ulong),("ullTotalPhys",ctypes.c_ulonglong),("ullAvailPhys",ctypes.c_ulonglong),("ullTotalPageFile",ctypes.c_ulonglong),("ullAvailPageFile",ctypes.c_ulonglong),("ullTotalVirtual",ctypes.c_ulonglong),("ullAvailVirtual",ctypes.c_ulonglong),("ullAvailExtendedVirtual",ctypes.c_ulonglong)]
+                m=M(); m.dwLength=ctypes.sizeof(m)
+                if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)): ram_gb=round(m.ullTotalPhys/(1024**3),1)
+        except Exception: pass
+    gpu="Not detected"; exe=shutil.which("nvidia-smi")
+    if exe:
+        try:
+            p=await asyncio.create_subprocess_exec(exe,"--query-gpu=name,memory.total","--format=csv,noheader",stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
+            out,_=await asyncio.wait_for(p.communicate(),timeout=5)
+            if p.returncode==0: gpu=out.decode("utf-8","replace").strip()[:300] or gpu
+        except Exception: pass
+    cfg=_active_brain()
+    return {"os":platform.platform(),"cpu":platform.processor() or platform.machine(),"logical_cpus":os.cpu_count(),"ram_gb":ram_gb,"gpu":gpu,"recommended_model":"qwen3:4b" if (ram_gb or 0)<16 else "qwen3:8b if memory permits; qwen3:4b for speed","provider":getattr(cfg,"provider",None),"model":getattr(cfg,"model",None)}
+
+@app.post("/api/local/workflows/{workflow}")
+async def run_local_sales_workflow(workflow: str, request: Request):
+    if workflow not in _LOCAL_WORKFLOWS: return JSONResponse({"error":"Unknown workflow. Allowed: "+", ".join(_LOCAL_WORKFLOWS)},status_code=404)
+    try: body=await request.json()
+    except Exception: return JSONResponse({"error":"Request body must be valid JSON."},status_code=400)
+    if not isinstance(body,dict): return JSONResponse({"error":"Request body must be an object."},status_code=400)
+    from sellbird.config import load_brain_config
+    cfg=load_brain_config()
+    if cfg.provider!="ollama": return JSONResponse({"error":f"Local-only mode: configured provider is {cfg.provider}, not Ollama. No cloud fallback was attempted."},status_code=503)
+    product_id=str(body.get("product_id") or ""); product_rows=await query_db("SELECT * FROM products WHERE id=? AND is_active=1",(product_id,)) if product_id else []; product=product_rows[0] if product_rows else {}
+    if workflow not in ("business_profile","reply_classification") and not product: return JSONResponse({"error":"Select an active product first."},status_code=400)
+    prospect_id=str(body.get("prospect_id") or ""); pros=await query_db("SELECT * FROM prospects WHERE id=?",(prospect_id,)) if prospect_id else []; prospect=pros[0] if pros else {}
+    if prospect_id and not prospect: return JSONResponse({"error":"Prospect not found."},status_code=404)
+    docs=[]
+    semantic_hits=[]
+    semantic_meta=None
+    if workflow=="prospect_research":
+        # Only retrieve documents owned by this product. Prospect-linked documents
+        # are also constrained to the same product to prevent cross-product leakage.
+        docs=await query_db("SELECT id,product_id,title,source_url,content FROM research_documents WHERE product_id=? ORDER BY downloaded_at DESC LIMIT 100",(product_id,))
+        if prospect_id:
+            docs += await query_db("SELECT id,product_id,title,source_url,content FROM research_documents WHERE prospect_id=? AND product_id=? ORDER BY downloaded_at DESC LIMIT 100",(prospect_id,product_id))
+        unique_docs={str(d.get("id")):d for d in docs if d.get("id")}
+        docs=list(unique_docs.values())
+        if not docs: return JSONResponse({"error":"No downloaded local research exists for this product/prospect. Save permitted public-source research first; this workflow does not browse."},status_code=400)
+    inp=body.get("input",{}); inp=inp if isinstance(inp,dict) else {"text":str(inp)}
+
+    # SELLBIRD_SEMANTIC_PROSPECT_RESEARCH_V2
+    # Embeddings and retrieval are local-only; Ollama receives only top-ranked
+    # chunks from this product's previously saved research documents.
+    if workflow=="prospect_research":
+        try:
+            from sellbird.local_embeddings import LocalEmbeddingIndex
+            embedding_index=LocalEmbeddingIndex(
+                model_dir=PROJECT_ROOT / "models" / "all-MiniLM-L6-v2",
+                db_path=PROJECT_ROOT / "data" / "local_embeddings.sqlite3",
+            )
+            for document in docs:
+                embedding_index.add_document(
+                    product_id=product_id,
+                    document_id=str(document["id"]),
+                    text=str(document.get("content") or ""),
+                )
+            product_terms=" ".join(str(product.get(k) or "") for k in ("name","description","pricing","key_benefits_json"))
+            prospect_terms=" ".join(str(prospect.get(k) or "") for k in ("name","company_name","company_domain","company_website","title","job_title","industry","description"))
+            company_info=body.get("company_information","")
+            if isinstance(company_info,(dict,list)):
+                company_info=json.dumps(company_info,ensure_ascii=False,default=str)
+            query_text=" ".join(str(x) for x in (
+                inp.get("query",inp.get("text","")), prospect_terms, product_terms,
+                company_info, "customer needs business profile product fit pains buying signals"
+            ) if x).strip()
+            semantic_hits=embedding_index.search(product_id=product_id,query=query_text,top_k=8)
+            if not semantic_hits:
+                return JSONResponse({"error":"Local semantic search found no non-empty research chunks for this product. Check the saved document content."},status_code=422)
+            by_id={str(d["id"]):d for d in docs}
+            retrieved=[]
+            for hit in semantic_hits:
+                original=by_id.get(str(hit["document_id"]))
+                if not original:
+                    continue
+                retrieved.append({
+                    "document_id":str(hit["document_id"]),
+                    "title":original.get("title",""),
+                    "source_url":original.get("source_url",""),
+                    "relevance_score":round(float(hit["score"]),4),
+                    "content":hit["text"],
+                })
+            if not retrieved:
+                return JSONResponse({"error":"Semantic retrieval returned chunks that could not be matched to this product's saved sources."},status_code=500)
+            docs=retrieved
+            semantic_meta={"enabled":True,"embedding_model":"all-MiniLM-L6-v2",
+                           "chunks_used":len(retrieved),
+                           "documents_used":len({d["document_id"] for d in retrieved}),
+                           "scope":"product_id"}
+        except Exception as exc:
+            logger.exception("Local semantic prospect retrieval failed")
+            return JSONResponse({"error":"Local semantic retrieval failed; no cloud fallback was attempted.","detail":str(exc)[:1000]},status_code=503)
+
+    context={"product":{k:product.get(k) for k in ("name","description","pricing","key_benefits_json") if product.get(k) is not None},"prospect":prospect,"local_research_documents":docs,"semantic_retrieval":semantic_meta,"company_information":body.get("company_information",{}),"conversation_sample":body.get("conversation_sample",""),"additional_input":inp}
+    prompt="You are a careful local sales assistant. Use ONLY supplied context; never invent facts, citations, customers, metrics or relationships. Mark uncertainty and evidence gaps. Task: "+_LOCAL_WORKFLOWS[workflow]+"\n\nCONTEXT JSON:\n"+json.dumps(context,ensure_ascii=False,default=str)[:45000]+"\n\nRespond ONLY with valid JSON."
+    # ICP_PROMPT_QUALITY_FIX_V1: derive a fresh ICP; never echo the stored ICP.
+    if workflow == "icp":
+        prompt = (
+            "You are a B2B market research analyst. Create a NEW product-specific ideal customer profile. "
+            "Base it on the product name, description, pricing and benefits in the supplied context. "
+            "Do not copy or assume an existing ICP. Do not invent customer evidence, geography or company size. "
+            "If a field is unsupported, write Not specified. Infer plausible buyer roles and industries only "
+            "when directly justified by the product purpose. Return one JSON object with exactly these keys: "
+            "industries (array of strings), company_size (string), buyer_roles (array of strings), geography (string), "
+            "pains (array of strings), buying_triggers (array of strings), disqualifiers (array of strings), rationale (string). "
+            "Avoid generic filler such as Uncertain. No context provided.\n\nCONTEXT JSON:\n"
+            + json.dumps(context, ensure_ascii=False, default=str)[:45000]
+            + "\n\nReturn only valid JSON, no markdown."
+        )
+    state=_state(); await state.init_db()
+    from sellbird.brain import Brain
+    brain=Brain(state,brain_config=cfg)
+    try: raw=await brain.think(prompt,expect_json=True,timeout=240,max_retries=0,agent="local_workflows",task=workflow)
+    except Exception as exc: raw=""; err=str(exc)
+    else: err=""
+    parsed=Brain._extract_json(raw) if raw else None
+    if not isinstance(parsed,(dict,list)):
+        result={"error":err or getattr(brain,"unavailable","") or ("Ollama returned no response." if not raw else "Ollama returned invalid JSON."),"raw_response":raw[:10000],"provider":"ollama","model":cfg.model}; status="failed"
+    else:
+        result=parsed if isinstance(parsed,dict) else {"items":parsed}; result.update({"provider":"ollama","model":cfg.model,"workflow":workflow}); status="completed"
+    rid=uuid.uuid4().hex[:16]
+    async with state._connect() as db:
+        await db.execute("INSERT INTO local_workflow_runs(id,workflow,product_id,prospect_id,input_json,output_json,provider,model,status,error) VALUES(?,?,?,?,?,?,'ollama',?,?,?)",(rid,workflow,product_id,prospect_id,json.dumps(body,ensure_ascii=False,default=str)[:45000],json.dumps(result,ensure_ascii=False,default=str)[:50000],cfg.model,status,result.get("error","")))
+        if status=="completed" and workflow=="icp" and product_id:
+            await db.execute("UPDATE products SET icp_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(json.dumps(result,ensure_ascii=False),product_id))
+        if status=="completed" and prospect_id and product_id:
+            if workflow=="prospect_score":
+                try: score=max(0,min(100,int(result.get("score",0))))
+                except Exception: score=0
+                await db.execute("INSERT INTO prospect_products(prospect_id,product_id,score) VALUES(?,?,?) ON CONFLICT(prospect_id,product_id) DO UPDATE SET score=excluded.score,updated_at=CURRENT_TIMESTAMP",(prospect_id,product_id,score))
+            elif workflow=="buying_signals":
+                await db.execute("INSERT INTO prospect_products(prospect_id,product_id,buying_signals_json) VALUES(?,?,?) ON CONFLICT(prospect_id,product_id) DO UPDATE SET buying_signals_json=excluded.buying_signals_json,updated_at=CURRENT_TIMESTAMP",(prospect_id,product_id,json.dumps(result.get("signals",[]))))
+            elif workflow=="problem_statement":
+                await db.execute("INSERT INTO prospect_products(prospect_id,product_id,problem_statement) VALUES(?,?,?) ON CONFLICT(prospect_id,product_id) DO UPDATE SET problem_statement=excluded.problem_statement,updated_at=CURRENT_TIMESTAMP",(prospect_id,product_id,str(result.get("problem_statement",""))))
+            elif workflow=="prospect_research":
+                await db.execute("INSERT INTO prospect_products(prospect_id,product_id,research_notes) VALUES(?,?,?) ON CONFLICT(prospect_id,product_id) DO UPDATE SET research_notes=excluded.research_notes,updated_at=CURRENT_TIMESTAMP",(prospect_id,product_id,json.dumps(result,ensure_ascii=False)[:12000]))
+        await db.commit()
+    if status!="completed": return JSONResponse({**result,"run_id":rid},status_code=502)
+    response={"success":True,"run_id":rid,**result}
+    if workflow=="prospect_research":
+        response["semantic_retrieval"]=semantic_meta
+    return response
+
+@app.get("/api/local/workflows/history")
+async def local_workflow_history():
+    await _state().init_db()
+    return await query_db("SELECT id,workflow,product_id,prospect_id,provider,model,status,error,created_at FROM local_workflow_runs ORDER BY created_at DESC LIMIT 100")
+
+
 @app.get("/api/companies")
 async def get_companies():
     """Companies with contact counts, fit score and register status, best fit first."""
@@ -1056,11 +1616,13 @@ async def get_stats():
         # get_usage_today use date.today()); SQLite's date('now') is UTC and
         # can select a different day's counts on either side of UTC midnight.
         usage = await query_db(
-            "SELECT claude_calls, codex_calls FROM usage_log WHERE date = ?",
+            "SELECT claude_calls, codex_calls, ollama_calls "
+            "FROM usage_log WHERE date = ?",
             (date.today().isoformat(),),
         )
         usage_today = (usage[0]["claude_calls"] or 0) if usage else 0
         codex_today = (usage[0]["codex_calls"] or 0) if usage else 0
+        ollama_today = (usage[0]["ollama_calls"] or 0) if usage else 0
 
         return {
             "prospects": {"total": prospect_total, "by_status": prospect_map},
@@ -1070,6 +1632,7 @@ async def get_stats():
             "actions_total": action_count,
             "claude_calls_today": usage_today,
             "codex_calls_today": codex_today,
+            "ollama_calls_today": ollama_today,
             "brain_provider": _active_provider(),
             "brain_status": await _brain_status(),
         }
@@ -1170,13 +1733,25 @@ async def get_usage():
     except Exception as e:
         logger.debug("Quota lookup failed: %s", e)
 
+    # Ollama runs locally and has no hosted subscription quota. Do not label
+    # that expected absence as an unavailable quota or attempt a cloud lookup.
+    quota_status = (
+        "local" if provider == "ollama"
+        else (("available" if quota else "unavailable") if provider else "")
+    )
+
     return {
         "provider": provider,
         "quota": quota,
-        # Whose quota this is, even when it couldn't be read, so the UI shows
-        # "unavailable" for the active provider instead of hiding the gauge.
+        # For Ollama, this identifies the local provider rather than a
+        # subscription bucket. The UI can use quota_status="local" to hide
+        # subscription gauges and explain that inference is running locally.
         "quota_provider": provider,
-        "quota_status": ("available" if quota else "unavailable") if provider else "",
+        "quota_status": quota_status,
+        "quota_message": (
+            "Local Ollama model — no subscription quota."
+            if provider == "ollama" else ""
+        ),
         "by_provider": by_provider,
         "totals": totals,
         "by_day": by_day,
@@ -3003,3 +3578,240 @@ def start_dashboard(host: str = "127.0.0.1", port: int = 5555):
                     proxy_headers=False, server_header=False, date_header=False)
     finally:
         dashboard_instance.remove(DB_PATH.parent, instance=INSTANCE_ID)
+
+# SELLBIRD_LOCAL_WORKFLOWS_API_V1
+# Eight assignment workflows. Model inference is pinned to configured Ollama;
+# this module deliberately contains no hosted-provider fallback.
+from pydantic import BaseModel as _LocalWorkflowModel
+
+class _LocalWorkflowRequest(_LocalWorkflowModel):
+    product_id: str = ''
+    prospect_id: str = ''
+    company_information: str = ''
+    conversation_sample: str = ''
+    input: dict = {}
+
+_LOCAL_WORKFLOW_NAMES = {
+    'business_profile', 'icp', 'prospect_research', 'buying_signals',
+    'problem_statement', 'personalized_email', 'prospect_score',
+    'reply_classification',
+}
+
+async def _local_workflow_db_ready():
+    state = _state()
+    await state.init_db()
+    async with state._connect() as db:
+        await db.execute('''CREATE TABLE IF NOT EXISTS local_workflow_runs (
+            id TEXT PRIMARY KEY, workflow TEXT NOT NULL, product_id TEXT DEFAULT '',
+            prospect_id TEXT DEFAULT '', status TEXT NOT NULL, provider TEXT DEFAULT 'ollama',
+            model TEXT DEFAULT '', input_json TEXT DEFAULT '{}', output_text TEXT DEFAULT '',
+            error TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        await db.commit()
+    return state
+
+async def _local_workflow_query(sql, params=()):
+    state = await _local_workflow_db_ready()
+    async with state._connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+def _local_product_from_row(row):
+    if not row:
+        return {}
+    item = dict(row)
+    for column, key, fallback in (
+        ('key_benefits_json', 'key_benefits', []),
+        ('objection_responses_json', 'objection_responses', {}),
+        ('icp_json', 'icp', {}),
+    ):
+        try:
+            item[key] = json.loads(item.get(column) or json.dumps(fallback))
+        except (TypeError, ValueError):
+            item[key] = fallback
+    item['is_active'] = bool(item.get('is_active', 0))
+    return item
+
+@app.get('/api/research/documents')
+async def local_workflow_list_research(product_id: str = ''):
+    await _local_workflow_db_ready()
+    sql = ('SELECT id,company_id,prospect_id,product_id,title,source_url,'
+           'content_hash,downloaded_at FROM research_documents')
+    params = ()
+    if product_id:
+        sql += ' WHERE product_id=?'
+        params = (product_id,)
+    sql += ' ORDER BY downloaded_at DESC LIMIT 200'
+    return await _local_workflow_query(sql, params)
+
+@app.get('/api/local/hardware')
+async def local_workflow_hardware():
+    import platform
+    import subprocess as _sp
+    ram_gb = None
+    try:
+        import psutil
+        ram_gb = round(psutil.virtual_memory().total / (1024 ** 3), 1)
+    except Exception:
+        try:
+            import ctypes
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [('length', ctypes.c_ulong), ('memoryLoad', ctypes.c_ulong),
+                    ('totalPhys', ctypes.c_ulonglong), ('availPhys', ctypes.c_ulonglong),
+                    ('totalPageFile', ctypes.c_ulonglong), ('availPageFile', ctypes.c_ulonglong),
+                    ('totalVirtual', ctypes.c_ulonglong), ('availVirtual', ctypes.c_ulonglong),
+                    ('availExtendedVirtual', ctypes.c_ulonglong)]
+            status = _MemStatus(); status.length = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                ram_gb = round(status.totalPhys / (1024 ** 3), 1)
+        except Exception:
+            pass
+    gpu = 'Not detected'
+    try:
+        result = _sp.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                         capture_output=True, text=True, timeout=3, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            gpu = result.stdout.strip().splitlines()[0]
+    except Exception:
+        pass
+    try:
+        from sellbird.config import load_config
+        brain_cfg = load_config().brain
+        provider, model = brain_cfg.provider, brain_cfg.model
+    except Exception as exc:
+        provider, model = 'unavailable', str(exc)
+    recommended = 'qwen3:1.7b' if ram_gb is not None and ram_gb < 8 else (
+        'qwen3:4b' if ram_gb is None or ram_gb < 16 else 'qwen3:8b')
+    return {'provider': provider, 'model': model, 'ram_gb': ram_gb,
+            'cpu': platform.processor() or platform.machine(), 'gpu': gpu,
+            'recommended_model': recommended,
+            'inference_policy': 'Ollama local inference only; no cloud fallback'}
+
+@app.post('/api/local/workflows/{workflow}')
+async def local_workflow_run(workflow: str, payload: _LocalWorkflowRequest):
+    if workflow not in _LOCAL_WORKFLOW_NAMES:
+        return JSONResponse({'success': False, 'error': 'Unknown workflow.'}, status_code=404)
+    state = await _local_workflow_db_ready()
+    product = {}
+    if payload.product_id:
+        rows = await _local_workflow_query('SELECT * FROM products WHERE id=?', (payload.product_id,))
+        product = _local_product_from_row(rows[0]) if rows else {}
+    if workflow not in ('business_profile', 'reply_classification') and not product:
+        return JSONResponse({'success': False, 'error': 'Select a saved active product first.'}, status_code=400)
+    research_text = ''
+    research_ids = []
+    if workflow == 'prospect_research':
+        docs = await _local_workflow_query(
+            'SELECT id,title,source_url,content FROM research_documents WHERE product_id=? ORDER BY downloaded_at DESC LIMIT 12',
+            (payload.product_id,))
+        if not docs:
+            return JSONResponse({'success': False,
+                'error': 'No downloaded research is saved for this product. Save public-source page text first; this workflow does not browse or invent facts.'}, status_code=400)
+        research_ids = [d['id'] for d in docs]
+        research_text = '\n\n'.join(
+            'DOCUMENT: '+str(d['title'])+'\nSOURCE: '+str(d['source_url'])+'\n'+str(d['content'])
+            for d in docs)
+    if payload.prospect_id:
+        prospect_rows = await _local_workflow_query(
+            'SELECT p.*, c.name AS company_name, c.domain AS company_domain, c.website AS company_website '
+            'FROM prospects p LEFT JOIN companies c ON c.id=p.company_id WHERE p.id=?',
+            (payload.prospect_id,))
+        if not prospect_rows:
+            return JSONResponse({'success': False, 'error': 'Prospect ID was not found in the local database.'}, status_code=404)
+        prospect = prospect_rows[0]
+    else:
+        prospect = {}
+    task_text = {
+      'business_profile': 'Build a company/business profile: summary, industry, offer, target buyers, differentiators, evidence, unknowns.',
+      'icp': 'Generate a PRODUCT-SPECIFIC ideal customer profile. Include segments, firmographics, buyer roles, pain points, triggers, exclusions, qualification criteria and disqualifiers.',
+      'prospect_research': 'Analyze the prospect using ONLY the supplied downloaded documents. Return verified facts with source/title evidence, product relevance, unknowns and confidence. Do not browse.',
+      'buying_signals': 'Classify buying signals as strong/medium/weak/none. For each signal provide exact evidence, interpretation, confidence and a sensible next action.',
+      'problem_statement': 'Create a concise customer problem statement, affected role, business impact, evidence, hypotheses clearly labelled, and validation questions.',
+      'personalized_email': 'Draft a short personalized first-touch email. Include subject and body. Use only supplied evidence; do not invent a relationship, metrics or personalization.',
+      'prospect_score': 'Score product fit from 0-100. Show factor-level scoring, evidence, confidence, missing data and reasons to disqualify. Do not inflate scores.',
+      'reply_classification': 'Classify the reply as positive, objection, not_interested, referral, out_of_office, unsubscribe or unclear. Explain evidence and recommend a human-reviewed next step.'
+    }[workflow]
+    prompt = '''You are a careful local B2B sales analyst. Never fabricate facts. Clearly separate verified facts, inference and unknowns. Use only the context below.\n'''
+    prompt += '\nPRODUCT:\n' + json.dumps(product, ensure_ascii=False)
+    prompt += '\nPROSPECT FROM LOCAL DB:\n' + json.dumps(prospect, ensure_ascii=False, default=str)
+    prompt += '\nCOMPANY INFORMATION:\n' + payload.company_information[:12000]
+    prompt += '\nCONVERSATION SAMPLE:\n' + payload.conversation_sample[:12000]
+    prompt += '\nADDITIONAL INPUT:\n' + json.dumps(payload.input, ensure_ascii=False)
+    prompt += '\nDOWNLOADED RESEARCH:\n' + research_text[:24000]
+    prompt += '\nTASK:\n' + task_text + '\nReturn structured JSON if possible.'
+    run_id = uuid.uuid4().hex
+    model = ''
+    try:
+        from sellbird.config import load_config
+        from sellbird.brain import Brain
+        cfg = load_config()
+        model = cfg.brain.model
+        if cfg.brain.provider != 'ollama':
+            raise RuntimeError("Local-only safety check blocked inference: brain.provider must be 'ollama'. No cloud provider was called.")
+        brain = Brain(state, cfg.brain)
+        # SELLBIRD_ICP_JSON_PERSISTENCE_FIX_V1
+        # ICP must be valid structured data, not a raw model transcript. Do not
+        # feed an existing ICP back as source context when generating a new one.
+        if workflow == 'icp':
+            import re
+            clean_product = {k: v for k, v in product.items() if k not in ('icp', 'icp_json')}
+            icp_prompt = (                'Create a NEW product-specific ideal customer profile using only the product facts below. '
+                'Do not copy any previous ICP. Do not invent geography, company size or customer evidence. '
+                'Use "Not specified" where unsupported. Return exactly one valid JSON object with these keys: '
+                'industries (array of strings), company_size (string), buyer_roles (array of strings), '
+                'geography (string), pains (array of strings), buying_triggers (array of strings), '
+                'disqualifiers (array of strings), rationale (string). No markdown and no extra keys.\n\n'
+                + json.dumps(clean_product, ensure_ascii=False, default=str)[:18000]
+            )
+            parsed_icp = await brain.think_json(icp_prompt, agent='assignment_workflow', task='icp')
+            if not isinstance(parsed_icp, dict):
+                raise RuntimeError('Ollama did not return valid ICP JSON. Re-run the ICP workflow; the existing saved ICP was not overwritten.')
+            required = ('industries','company_size','buyer_roles','geography','pains','buying_triggers','disqualifiers','rationale')
+            for key in required:
+                if key not in parsed_icp:
+                    parsed_icp[key] = [] if key in ('industries','buyer_roles','pains','buying_triggers','disqualifiers') else 'Not specified'
+            parsed_icp = {key: parsed_icp[key] for key in required}
+            answer = json.dumps(parsed_icp, ensure_ascii=False, indent=2)
+        else:
+            answer = await brain.think(prompt, timeout=300, max_retries=1,
+                                       agent='assignment_workflow', task=workflow)
+        if not answer or not answer.strip():
+            raise RuntimeError('Ollama returned no response. Check that Ollama is running and the configured model is installed.')
+        async with state._connect() as db:
+            await db.execute('INSERT INTO local_workflow_runs(id,workflow,product_id,prospect_id,status,provider,model,input_json,output_text) VALUES(?,?,?,?,?,?,?,?,?)',
+                (run_id, workflow, payload.product_id, payload.prospect_id, 'completed', 'ollama', model,
+                 json.dumps(payload.model_dump(), ensure_ascii=False), answer))
+            if workflow == 'icp':
+                await db.execute('UPDATE products SET icp_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',
+                                 (json.dumps(parsed_icp, ensure_ascii=False), payload.product_id))
+            if payload.prospect_id and workflow in ('prospect_research','buying_signals','problem_statement','prospect_score'):
+                column = {'prospect_research':'research_notes','buying_signals':'buying_signals_json',
+                          'problem_statement':'problem_statement','prospect_score':'score'}[workflow]
+                if workflow == 'prospect_score':
+                    import re
+                    match = re.search(r'(?<!\\d)(100|[1-9]?\\d)(?!\\d)', answer)
+                    value = int(match.group(1)) if match else 0
+                    await db.execute('INSERT INTO prospect_products(prospect_id,product_id,score) VALUES(?,?,?) ON CONFLICT(prospect_id,product_id) DO UPDATE SET score=excluded.score,updated_at=CURRENT_TIMESTAMP',
+                                     (payload.prospect_id,payload.product_id,value))
+                else:
+                    value = json.dumps([answer]) if workflow == 'buying_signals' else answer
+                    await db.execute(f'INSERT INTO prospect_products(prospect_id,product_id,{column}) VALUES(?,?,?) ON CONFLICT(prospect_id,product_id) DO UPDATE SET {column}=excluded.{column},updated_at=CURRENT_TIMESTAMP',
+                                     (payload.prospect_id,payload.product_id,value))
+            await db.commit()
+        return {'success': True, 'id': run_id, 'workflow': workflow, 'provider': 'ollama',
+                'model': model, 'result': parsed_icp if workflow == 'icp' else answer,
+                'research_document_ids': research_ids}
+    except Exception as exc:
+        error = str(exc)
+        async with state._connect() as db:
+            await db.execute('INSERT INTO local_workflow_runs(id,workflow,product_id,prospect_id,status,provider,model,input_json,error) VALUES(?,?,?,?,?,?,?,?,?)',
+                (run_id, workflow, payload.product_id, payload.prospect_id, 'failed', 'ollama', model,
+                 json.dumps(payload.model_dump(), ensure_ascii=False), error))
+            await db.commit()
+        return JSONResponse({'success': False, 'error': error, 'provider': 'ollama-only'}, status_code=503)
+
+@app.get('/api/local/workflows/history')
+async def local_workflow_history():
+    return await _local_workflow_query(
+        'SELECT id,workflow,product_id,prospect_id,status,provider,model,error,created_at '
+        'FROM local_workflow_runs ORDER BY created_at DESC LIMIT 100')

@@ -1,10 +1,8 @@
 """Brain — Sellbird's thinking engine.
 
-Runs on the operator's Claude subscription (Claude Code headless, the
-default) or, when ``brain.provider: codex`` is configured, their ChatGPT
-subscription through an isolated Codex runtime (see sellbird/codex.py). The
-provider is fixed per Brain; a failing provider never falls back to the
-other one.
+Supports Claude Code, the isolated Codex runtime, and local Ollama inference.
+The provider is fixed per Brain; a failing provider never falls back to
+another provider.
 """
 
 import asyncio
@@ -40,7 +38,11 @@ _NON_RETRYABLE_PATTERNS = (
 )
 
 
-PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex"}
+PROVIDER_LABELS = {
+    "claude": "Claude",
+    "codex": "Codex",
+    "ollama": "Ollama",
+}
 
 # Settings key holding the brain's last health transition, for `sellbird
 # status` and the dashboard: {"provider", "status": "ok"|"paused", "reason",
@@ -98,7 +100,7 @@ def _read_knowledge(folder: str, name: str) -> str:
 
 class Brain:
     def __init__(self, state: StateManager, brain_config=None, transport=None):
-        """``transport``, when given, replaces the Claude and Codex CLIs: an
+        """``transport``, when given, replaces the configured inference runtime: an
         ``async transport(prompt, *, agent, task, timeout, expect_json) -> str``
         that returns the model's text ("" on failure). It may carry a
         ``paused_reason`` attribute (str) to pause calls the way a usage limit
@@ -112,27 +114,40 @@ class Brain:
         self.config = brain_config or BrainConfig()
         self.provider = self.config.provider
         self.model = self.config.model
+
         self.codex = None
+        self.ollama = None
+        self.quota = None
+
         # Whether the last think_json got no reply at all (an outage, logout,
-        # rate limit or timeout), as opposed to a reply that wasn't valid
-        # JSON. Callers that count model failures must not count outages.
+        # rate limit or timeout), as opposed to a reply that wasn't valid JSON.
         self.last_reply_empty = False
-        # Codex health (unused for Claude, whose behaviour is unchanged).
+
         self.unavailable = ""
         self._unavailable_at = 0.0
         self._unavailable_fingerprint = None
         self._usage_limited_until = 0.0
         self._usage_pause_recorded = False
         self._status_synced = False
+
         if self.provider == "codex":
             from sellbird.codex import CodexClient, CodexQuotaClient
+
             self.codex = CodexClient(
-                model=self.model, reasoning_effort=self.config.reasoning_effort
+                model=self.model,
+                reasoning_effort=self.config.reasoning_effort,
             )
             self.quota = CodexQuotaClient(self.codex)
+
+        elif self.provider == "ollama":
+            from sellbird.ollama import OllamaClient
+
+            self.ollama = OllamaClient(model=self.model)
+
         else:
             # Lazy import avoids a cycle (quota -> usage -> state).
             from sellbird.integrations.quota import QuotaClient
+
             self.quota = QuotaClient()
 
     @property
@@ -166,6 +181,17 @@ class Brain:
         PROVIDER_RECHECK_SECONDS, so a persistent problem doesn't start
         runtimes every heartbeat.
         """
+        if self.provider == "ollama":
+            try:
+                await self.ollama.preflight()
+            except Exception as exc:
+                await self._mark_unavailable(exc)
+                return self.unavailable
+
+            if self.unavailable:
+                await self._mark_available()
+            return ""
+
         if self.provider != "codex":
             return await self._claude_preflight()
         from sellbird.codex import CodexError
@@ -225,6 +251,8 @@ class Brain:
     def _fingerprint(self):
         if self.provider == "codex":
             return self.codex.fingerprint()
+        if self.provider == "ollama":
+            return (self.ollama.base_url, self.ollama.model)
         from sellbird.claude_runtime import fingerprint
         return fingerprint()
 
@@ -292,12 +320,26 @@ class Brain:
         dashboard can attribute tokens and cost to specific work.
         """
         if self.transport is not None:
+
             return await self._think_transport(prompt, expect_json=expect_json,
                                                timeout=timeout, agent=agent, task=task)
+        if self.provider == "ollama":
+            return await self._think_ollama(
+                prompt,
+                timeout=timeout,
+                expect_json=expect_json,
+                max_retries=max_retries,
+                agent=agent,
+                task=task,
+            )
         if self.provider == "codex":
             return await self._think_codex(
-                prompt, session_id=session_id, timeout=timeout,
-                max_retries=max_retries, agent=agent, task=task,
+                prompt,
+                session_id=session_id,
+                timeout=timeout,
+                max_retries=max_retries,
+                agent=agent,
+                task=task,
             )
 
         from sellbird import claude_runtime
@@ -440,6 +482,75 @@ class Brain:
             f"Brain call failed after {max_retries + 1} attempts. "
             f"Last error: {str(last_error)[:200]}"
         )
+        return ""
+
+    async def _think_ollama(
+        self,
+        prompt: str,
+        *,
+        timeout: float,
+        expect_json: bool,
+        max_retries: int,
+        agent: str,
+        task: str,
+    ) -> str:
+        """Run inference through the configured local Ollama model."""
+        if self.paused_reason:
+            logger.debug(f"Ollama call skipped: {self.paused_reason}")
+            return ""
+
+        last_error = ""
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                logger.info(
+                    f"Retrying Ollama call in {delay:.0f}s "
+                    f"(attempt {attempt + 1}/{max_retries + 1})..."
+                )
+                await asyncio.sleep(delay)
+
+            try:
+                result = await asyncio.wait_for(
+                    self.ollama.generate(
+                        prompt,
+                        timeout=timeout,
+                        expect_json=expect_json,
+                    ),
+                    timeout=timeout + 5,
+                )
+                response = str(result or "")
+                if response:
+                    await self.state.increment_usage(provider="ollama")
+                    try:
+                        await self.state.record_usage_event(
+                        agent=agent,
+                        task=task or "ollama_inference",
+                        model=self.model,
+                        duration_ms=0,
+                        num_turns=1,
+                        cost_usd=0.0,
+                        source="ollama",
+                        provider="ollama",
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to record Ollama usage event: %s", exc)
+
+                    if self.unavailable:
+                        await self._mark_available()
+                    return response
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Ollama inference failed (%s/%s): %s",
+                    agent,
+                    task,
+                    exc,
+                )
+
+        await self._mark_unavailable(last_error or "Ollama returned no response")
         return ""
 
     async def _think_codex(
@@ -617,7 +728,11 @@ class Brain:
             + "\n\nRespond ONLY with valid JSON. No markdown, no explanation."
         )
         response = await self.think(
-            full_prompt, session_id=session_id, agent=agent, task=task
+            full_prompt,
+            session_id=session_id,
+            expect_json=True,
+            agent=agent,
+            task=task,
         )
         self.last_reply_empty = not response
         if not response:
@@ -678,7 +793,7 @@ class Brain:
             # not be mistaken for room to spend.
             logger.info(f"{self.paused_reason}; waiting for it to reset.")
             return False
-        if max_percent is not None:
+        if max_percent is not None and self.provider != "ollama":
             try:
                 windows = await self.quota.get_utilization()
             except Exception as e:
