@@ -9,6 +9,14 @@ The application supports multiple products, product-specific customer profiles, 
 
 > **Assignment implementation:** This repository contains a local Ollama inference migration and local workflow implementation. It originated from the upstream Sellbird project. See the upstream repository and retain its applicable licensing and attribution.
 
+## 🎥 Project Demo Video
+
+Watch the complete walkthrough of the Local AI Sales Agent, demonstrating its dashboard, local Ollama integration, multi-product workflows, and AI-powered sales capabilities.
+
+**[▶ Watch the Project Demo Video](https://drive.google.com/file/d/19HKwYgikucqOwdjipDAZ6g4VzGzUD39S/view?usp=sharing)**
+
+
+
 ## 1. Key features
 
 - Local LLM inference through Ollama.
